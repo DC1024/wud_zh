@@ -60,7 +60,7 @@
 | 分支 | **`i18n-zh`** |
 | 仓库名 | **`DC1024/wud_zh`**（原名 `DC1024/wud`，已更名；镜像同步改为 `ghcr.io/dc1024/wud_zh`） |
 | 预构建镜像 | **`ghcr.io/dc1024/wud_zh:latest`**（公开，无需登录即可拉取） |
-| 基于上游版本 | `9.1.0` |
+| 基于上游版本 | `9.2.0` |
 | 改动规模 | 41 个文件，+2957 / −267（主体是 `ui/` 前端；另含一项后端增强「监控清单」，向后兼容、不改上游行为） |
 
 ### 🚀 直接使用汉化镜像
@@ -315,6 +315,26 @@ services:
 ```
 
 > 🌐 **Access the Web UI**: Open [`http://localhost:3000`](http://localhost:3000) in your browser (login with `admin` / `MySecurePassword123`).
+
+### 3. Run in One-Shot CLI Mode (CI/CD & Cron)
+
+WUD can also run as a stateless, headless CLI tool without starting the web server or creating a database file:
+
+```bash
+# Run a single scan and print container status as JSON
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e WUD_RUN_MODE=oneshot \
+  getwud/wud:latest watch
+
+# Gate CI/CD pipelines: exit with code 1 if at least one update is available
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e WUD_RUN_MODE=oneshot \
+  getwud/wud:latest watch --update-available --fail-on-update
+```
+
+📖 Check the full [One-Shot Headless Mode Documentation](https://getwud.app/docs/configuration/oneshot/) for flags, NDJSON output, and cron examples.
 
 ---
 

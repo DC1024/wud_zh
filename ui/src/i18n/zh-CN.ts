@@ -199,6 +199,8 @@ export default {
     snoozedText: "版本 {version} 已暂缓{until}。",
     tag: "标签",
     semver: "semver",
+    version: "版本",
+    built: "构建于",
     link: "链接",
     digest: "摘要",
     kind: "更新类型",

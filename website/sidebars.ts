@@ -122,6 +122,11 @@ const sidebars = {
         },
         {
           type: 'doc',
+          id: 'configuration/oneshot',
+          label: 'One-Shot Headless Mode',
+        },
+        {
+          type: 'doc',
           id: 'configuration/logs/README',
           label: 'Logging',
         },
@@ -168,7 +173,7 @@ const sidebars = {
     {
       type: 'doc',
       id: 'configuration/watchers/remote-tls',
-      label: 'Remote Daemons & TLS',
+      label: 'Remote Daemons & Multi-Host',
     },
     {
       type: 'doc',

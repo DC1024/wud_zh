@@ -89,6 +89,7 @@ describe('Docker Hub Registry tests', () => {
             url: 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/nginx:pull&grant_type=password',
             headers: {
                 Accept: 'application/json',
+                'User-Agent': expect.stringMatching(/^wud\/.+/),
                 Authorization: 'Basic base64credentials',
             },
         });
@@ -111,9 +112,34 @@ describe('Docker Hub Registry tests', () => {
             url: 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/nginx:pull&grant_type=password',
             headers: {
                 Accept: 'application/json',
+                'User-Agent': expect.stringMatching(/^wud\/.+/),
             },
         });
         expect(result.headers.Authorization).toBe('Bearer public-token');
+    });
+
+    test('should authenticate with proxy configured', async () => {
+        const { default: axios } = await import('axios');
+        const { HttpsProxyAgent } = await import('https-proxy-agent');
+        axios.mockResolvedValue({ data: { token: 'proxy-token' } });
+
+        hub.configuration.proxy = 'http://hub-proxy:3128';
+        hub.getAuthCredentials = jest.fn().mockReturnValue(null);
+
+        const image = { name: 'library/nginx' };
+        const requestOptions = { headers: {} };
+
+        const result = await hub.authenticate(image, requestOptions);
+
+        expect(axios).toHaveBeenCalledWith(
+            expect.objectContaining({
+                method: 'GET',
+                url: 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/nginx:pull&grant_type=password',
+                httpsAgent: expect.any(HttpsProxyAgent),
+                proxy: false,
+            }),
+        );
+        expect(result.headers.Authorization).toBe('Bearer proxy-token');
     });
 
     // testRegistryProvider boilerplate handles validate string configuration
@@ -343,7 +369,10 @@ describe('Docker Hub Registry tests', () => {
             expect(axios).toHaveBeenCalledWith({
                 method: 'GET',
                 url: 'https://docker.1panel.live/token?service=docker.1panel.live&scope=repository:library/nginx:pull&grant_type=password',
-                headers: { Accept: 'application/json' },
+                headers: {
+                    Accept: 'application/json',
+                    'User-Agent': expect.stringMatching(/^wud\/.+/),
+                },
             });
             expect(result.headers.Authorization).toBe('Bearer mirror-token');
         });

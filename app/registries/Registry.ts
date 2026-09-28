@@ -3,6 +3,8 @@ import log from '../log';
 import Component, { ComponentConfiguration } from '../registry/Component';
 import { getSummaryTags } from '../prometheus/registry';
 import { ContainerImage } from '../model/container';
+import { getVersion } from '../configuration';
+import { applyProxyConfig } from '../http/proxy';
 
 const DEFAULT_CONCURRENCY = 2;
 const MAX_RATE_LIMIT_RETRIES = 2;
@@ -13,6 +15,26 @@ export interface RegistryManifest {
     digest?: string;
     version?: number;
     created?: string;
+    /**
+     * Digest of the image config blob, when the fetched manifest carried it.
+     * Absent for a multi-arch index, whose child manifest was not fetched.
+     */
+    configDigest?: string;
+}
+
+export interface RegistryImageConfig {
+    created?: string;
+    version?: string;
+}
+
+/**
+ * Image config blob (the object a manifest's `config.digest` points at).
+ */
+export interface RegistryConfigBlobResponse {
+    created?: string;
+    config?: {
+        Labels?: Record<string, string>;
+    };
 }
 
 export interface RegistryTagsList {
@@ -41,10 +63,18 @@ export interface RegistryManifestResponse {
     }[];
 }
 
+export function getUserAgent(): string {
+    return `wud/${getVersion()}`;
+}
+
 /**
  * Docker Registry Abstract class.
  */
 export class Registry extends Component {
+    static getUserAgent(): string {
+        return getUserAgent();
+    }
+
     private activeRequests = 0;
     private readonly pendingRequests: (() => void)[] = [];
 
@@ -55,9 +85,10 @@ export class Registry extends Component {
             configuration !== null &&
             typeof configuration === 'object' &&
             !Array.isArray(configuration);
-        const { concurrency, ...providerConfiguration } = isObjectConfiguration
-            ? configuration
-            : { concurrency: undefined };
+        const { concurrency, proxy, ...providerConfiguration } =
+            isObjectConfiguration
+                ? configuration
+                : { concurrency: undefined, proxy: undefined };
 
         const concurrencyValidated = this.joi
             .number()
@@ -69,6 +100,15 @@ export class Registry extends Component {
             throw concurrencyValidated.error;
         }
 
+        const proxyValidated = this.joi
+            .string()
+            .uri()
+            .optional()
+            .validate(proxy);
+        if (proxyValidated.error) {
+            throw proxyValidated.error;
+        }
+
         const providerSchema = this.getConfigurationSchema();
         let providerConfigurationValidated = providerSchema.validate(
             isObjectConfiguration ? providerConfiguration : configuration,
@@ -76,7 +116,8 @@ export class Registry extends Component {
         if (
             providerConfigurationValidated.error &&
             isObjectConfiguration &&
-            Object.hasOwn(configuration, 'concurrency') &&
+            (Object.hasOwn(configuration, 'concurrency') ||
+                Object.hasOwn(configuration, 'proxy')) &&
             Object.keys(providerConfiguration).length === 0
         ) {
             const anonymousConfigurationValidated = providerSchema.validate('');
@@ -95,6 +136,9 @@ export class Registry extends Component {
                 ? providerConfigurationValidated.value
                 : {}),
             concurrency: concurrencyValidated.value,
+            ...(proxyValidated.value !== undefined
+                ? { proxy: proxyValidated.value }
+                : {}),
         };
     }
 
@@ -203,6 +247,7 @@ export class Registry extends Component {
         const tagOrDigest = digest || image.tag.value;
         let manifestDigestFound;
         let manifestMediaType;
+        let configDigestFound;
         this.log.debug(
             `${this.getId()} - Get ${image.name}:${tagOrDigest} manifest`,
         );
@@ -280,6 +325,10 @@ export class Registry extends Component {
                     );
                     manifestDigestFound = tagOrDigest;
                     manifestMediaType = responseManifests.mediaType;
+                    // This response IS the platform manifest, so its config
+                    // digest is already known; remember it so callers wanting
+                    // the config blob need not re-fetch the manifest.
+                    configDigestFound = responseManifests.config?.digest;
                 }
             } else if (responseManifests.schemaVersion === 1) {
                 log.debug('Manifests found with schemaVersion = 1');
@@ -320,6 +369,11 @@ export class Registry extends Component {
                 const manifestFound = {
                     digest: responseManifest.headers['docker-content-digest'],
                     version: 2,
+                    // Only present when the fetched manifest carried it, i.e.
+                    // not for a multi-arch index.
+                    ...(configDigestFound
+                        ? { configDigest: configDigestFound }
+                        : {}),
                 };
                 log.debug(
                     `Manifest found with [digest=${manifestFound.digest}, version=${manifestFound.version}]`,
@@ -346,6 +400,67 @@ export class Registry extends Component {
         }
         // Empty result...
         throw new Error('Unexpected error; no manifest found');
+    }
+
+    /**
+     * Get the version label and build date of a remote image.
+     *
+     * A digest-only update ("sha A -> sha B") says nothing about what changed.
+     * Both the `org.opencontainers.image.version` label and the build date live
+     * in the image config blob, which the manifest points at.
+     *
+     * Pass `knownConfigDigest` when the manifest has already been fetched (see
+     * `RegistryManifest.configDigest`) to resolve the config in a single request
+     * instead of two.
+     */
+    async getImageConfig(
+        image: ContainerImage,
+        manifestDigest: string,
+        knownConfigDigest?: string,
+    ): Promise<RegistryImageConfig> {
+        this.log.debug(
+            `${this.getId()} - Get ${image.name}@${manifestDigest} image config`,
+        );
+
+        let configDigest = knownConfigDigest;
+        if (!configDigest) {
+            // Addressing a manifest by its own digest never yields an index,
+            // so only the single-platform manifest types are accepted here.
+            const manifest = await this.callRegistry<RegistryManifestResponse>({
+                image,
+                url: `${image.registry.url}/${image.name}/manifests/${manifestDigest}`,
+                headers: {
+                    Accept: 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json',
+                },
+            });
+            configDigest = manifest?.config?.digest;
+        }
+
+        if (!configDigest) {
+            throw new Error(
+                `No config digest found in manifest ${manifestDigest}`,
+            );
+        }
+
+        const configBlob = await this.callRegistry<RegistryConfigBlobResponse>({
+            image,
+            url: `${image.registry.url}/${image.name}/blobs/${configDigest}`,
+        });
+
+        const imageConfig: RegistryImageConfig = {
+            created: configBlob?.created || undefined,
+            // Images built with `ARG VERSION` + `LABEL ...version=$VERSION` and no
+            // build arg publish an EMPTY label. Keep it undefined rather than '',
+            // which the container schema rejects.
+            version:
+                configBlob?.config?.Labels?.[
+                    'org.opencontainers.image.version'
+                ] || undefined,
+        };
+        this.log.debug(
+            `Image config found with [created=${imageConfig.created}, version=${imageConfig.version}]`,
+        );
+        return imageConfig;
     }
 
     async callRegistry<T = any>(options: {
@@ -380,12 +495,18 @@ export class Registry extends Component {
         resolveWithFullResponse?: boolean;
     }): Promise<T | AxiosResponse<T>> {
         // Request options
-        const axiosOptions: AxiosRequestConfig = {
-            url,
-            method,
-            headers,
-            responseType: 'json',
-        };
+        const axiosOptions: AxiosRequestConfig = applyProxyConfig(
+            {
+                url,
+                method,
+                headers: {
+                    'User-Agent': getUserAgent(),
+                    ...(headers || {}),
+                },
+                responseType: 'json',
+            },
+            this.configuration?.proxy,
+        );
         let axiosOptionsWithAuth: AxiosRequestConfig | undefined;
 
         for (let retry = 0; ; retry += 1) {

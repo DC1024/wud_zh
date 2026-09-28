@@ -12,7 +12,12 @@ jest.mock('../../../event');
 jest.mock('../../../store/container');
 jest.mock('../../../registry');
 jest.mock('../../../model/container');
-jest.mock('../../../tag');
+jest.mock('../../../tag', () => ({
+    ...jest.requireActual('../../../tag'),
+    parse: jest.fn(),
+    isGreater: jest.fn(),
+    transform: jest.fn(),
+}));
 jest.mock('../../../prometheus/watcher');
 jest.mock('parse-docker-image-name');
 
@@ -917,6 +922,38 @@ describe('Kubernetes Watcher', () => {
             expect(storeContainer.updateContainer).toHaveBeenCalled();
             expect(report.changed).toBe(false);
         });
+
+        test('should update container watcher in store when watcher name changed in mapWorkloadContainerToWudContainer', async () => {
+            const existing = {
+                id: 'k8s_default_Deployment_web_nginx',
+                name: 'nginx',
+                watcher: 'old-k8s',
+                result: { tag: '2.0.0' },
+                error: undefined,
+            } as any;
+            storeContainer.getContainer.mockReturnValue(existing);
+            const workload = {
+                namespace: 'default',
+                kind: 'Deployment',
+                name: 'web',
+                annotations: {},
+            };
+            const containerSpec = { name: 'nginx', image: 'nginx:1.0.0' };
+
+            const result = await kubernetes.mapWorkloadContainerToWudContainer(
+                workload as any,
+                containerSpec as any,
+                'amd64',
+            );
+
+            expect(result.watcher).toBe('test');
+            expect(storeContainer.updateContainer).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    id: 'k8s_default_Deployment_web_nginx',
+                    watcher: 'test',
+                }),
+            );
+        });
     });
 
     // ─── Workload Types Tests ───────────────────────────────────────────────────
@@ -1116,6 +1153,108 @@ describe('Kubernetes Watcher', () => {
             expect(
                 mockBatchV1Api.listCronJobForAllNamespaces,
             ).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('one-shot mode', () => {
+        const originalRunMode = process.env.WUD_RUN_MODE;
+
+        beforeEach(() => {
+            process.env.WUD_RUN_MODE = 'oneshot';
+        });
+
+        afterEach(() => {
+            if (originalRunMode === undefined) {
+                delete process.env.WUD_RUN_MODE;
+            } else {
+                process.env.WUD_RUN_MODE = originalRunMode;
+            }
+        });
+
+        test('init should disable cron and watchatstart in one-shot mode', async () => {
+            await kubernetes.register('watcher', 'kubernetes', 'test', {
+                cron: '0 * * * *',
+                watchatstart: true,
+            });
+            mockCron.schedule.mockClear();
+            storeContainer.getContainers.mockClear();
+
+            await kubernetes.init();
+
+            expect(mockCron.schedule).not.toHaveBeenCalled();
+            expect(storeContainer.getContainers).not.toHaveBeenCalled();
+            expect(kubernetes.watchCron).toBeUndefined();
+            expect(kubernetes.watchCronTimeout).toBeUndefined();
+        });
+
+        test('mapContainerToContainerReport should be stateless in one-shot mode', () => {
+            storeContainer.getContainer.mockClear();
+            storeContainer.insertContainer.mockClear();
+            storeContainer.updateContainer.mockClear();
+
+            const containerWithUpdate = {
+                id: 'k8s-c1',
+                updateAvailable: true,
+            };
+            const reportWithUpdate =
+                kubernetes.mapContainerToContainerReport(containerWithUpdate);
+            expect(reportWithUpdate.container).toBe(containerWithUpdate);
+            expect(reportWithUpdate.changed).toBe(true);
+
+            const containerWithoutUpdate = {
+                id: 'k8s-c2',
+                updateAvailable: false,
+            };
+            const reportWithoutUpdate =
+                kubernetes.mapContainerToContainerReport(
+                    containerWithoutUpdate,
+                );
+            expect(reportWithoutUpdate.container).toBe(containerWithoutUpdate);
+            expect(reportWithoutUpdate.changed).toBe(false);
+
+            expect(storeContainer.getContainer).not.toHaveBeenCalled();
+            expect(storeContainer.insertContainer).not.toHaveBeenCalled();
+            expect(storeContainer.updateContainer).not.toHaveBeenCalled();
+        });
+
+        test('watchContainer should not query store in one-shot mode', async () => {
+            await kubernetes.register('watcher', 'kubernetes', 'test', {});
+            storeContainer.getContainer.mockClear();
+
+            mockParse.mockReturnValue({
+                domain: '',
+                path: 'nginx',
+                tag: '1.0',
+            });
+            mockTag.parse.mockReturnValue({ major: 1, minor: 0, patch: 0 });
+
+            const workload = {
+                namespace: 'default',
+                kind: 'Deployment',
+                name: 'nginx-dp',
+                annotations: {},
+                containers: [{ name: 'nginx', image: 'nginx:1.0' }],
+            };
+            const containerSpec = workload.containers[0];
+
+            await kubernetes.watchContainer(workload, containerSpec);
+
+            expect(storeContainer.getContainer).not.toHaveBeenCalled();
+        });
+
+        test('watch should not prune from store in one-shot mode', async () => {
+            await kubernetes.register('watcher', 'kubernetes', 'test', {
+                workloadtypes: ['Deployment'],
+            });
+            storeContainer.getContainers.mockClear();
+
+            mockAppsV1Api.listDeploymentForAllNamespaces.mockResolvedValue({
+                items: [],
+            });
+
+            await kubernetes.watch();
+
+            expect(storeContainer.getContainers).not.toHaveBeenCalled();
         });
     });
 });

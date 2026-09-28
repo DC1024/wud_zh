@@ -1,7 +1,9 @@
 import axios, { AxiosRequestConfig, AxiosResponse, Method } from 'axios';
 import Custom from '../custom/Custom';
+import { getUserAgent } from '../../Registry';
 import { ContainerImage } from '../../../model/container';
 import * as hubMirrorStore from '../../../store/hubMirror';
+import { applyProxyConfig } from '../../../http/proxy';
 
 /** Default Docker Hub registry API base. */
 const DEFAULT_HUB_URL = 'https://registry-1.docker.io';
@@ -336,12 +338,17 @@ class Hub extends Custom {
             url: `${this.configuration.authurl}?service=${this.configuration.service}&scope=repository:${image.name}:pull&grant_type=password`,
             headers: {
                 Accept: 'application/json',
+                'User-Agent': getUserAgent(),
             },
         };
 
         // Add Authorization if any
         if (credentials) {
             axiosConfig.headers.Authorization = `Basic ${credentials}`;
+        }
+
+        if (this.configuration?.proxy) {
+            applyProxyConfig(axiosConfig, this.configuration.proxy);
         }
 
         const response = await axios(axiosConfig);

@@ -10,6 +10,8 @@ import {
     parse as parseSemver,
     isGreater as isGreaterSemver,
     transform as transformTag,
+    extractTagComponents,
+    isPrerelease,
 } from '../../../tag';
 import * as event from '../../../event';
 import {
@@ -30,6 +32,7 @@ import {
 } from './label';
 import * as storeContainer from '../../../store/container';
 import * as storeWatchPreference from '../../../store/watchPreference';
+import { isOneshot } from '../../../runtime/mode';
 import {
     validate as validateContainer,
     fullName,
@@ -56,6 +59,8 @@ export interface DockerWatcherConfiguration extends ComponentConfiguration {
     watchdigestdefault?: boolean;
     watchevents: boolean;
     watchatstart: boolean;
+    delay?: string;
+    exclude?: string;
 }
 
 /**
@@ -90,7 +95,7 @@ function getRegistries() {
 /**
  * Filter candidate tags (based on tag name).
  */
-function getTagCandidates(
+export function getTagCandidates(
     container: Container,
     tags: string[],
     logContainer: any,
@@ -121,38 +126,55 @@ function getTagCandidates(
     if (container.image.tag.semver) {
         if (filteredTags.length === 0) {
             logContainer.warn(
-                'No tags found after filtering; check you regex filters',
+                'No tags found after filtering; check your regex filters',
             );
         }
 
-        // If user has not specified custom include regex, default to keep current prefix
-        // Prefix is almost-always standardized around "must stay the same" for tags
-        if (!container.includeTags) {
-            const currentTag = container.image.tag.value;
-            const match = currentTag.match(/^(.*?)(\d+.*)$/);
-            const currentPrefix = match ? match[1] : '';
+        const currentTag = container.image.tag.value;
+        const currentComponents = extractTagComponents(currentTag);
 
-            if (currentPrefix) {
-                // Retain only tags with the same non-empty prefix
+        // If user has not specified custom include regex:
+        if (!container.includeTags) {
+            // Retain prefix consistency
+            if (currentComponents.prefix) {
                 filteredTags = filteredTags.filter((tag) =>
-                    tag.startsWith(currentPrefix),
+                    tag.startsWith(currentComponents.prefix),
                 );
             } else {
                 // Retain only tags that start with a number (no prefix)
                 filteredTags = filteredTags.filter((tag) => /^\d/.test(tag));
             }
 
+            // Exclude pre-releases if current tag is a stable release
+            if (!currentComponents.isPrerelease) {
+                filteredTags = filteredTags.filter((tag) => !isPrerelease(tag));
+            }
+
+            // Default flavor/suffix matching:
+            // if current tag has no flavor/distro suffix (e.g. 8, 18), only match candidate tags that also have no suffix (or matching suffix).
+            if (!currentComponents.flavor) {
+                filteredTags = filteredTags.filter((tag) => {
+                    const tagComp = extractTagComponents(tag);
+                    return !tagComp.flavor;
+                });
+            } else {
+                filteredTags = filteredTags.filter((tag) => {
+                    const tagComp = extractTagComponents(tag);
+                    return tagComp.flavor === currentComponents.flavor;
+                });
+            }
+
             // Ensure we throw good errors when we've prefix-related issues
             if (filteredTags.length === 0) {
-                if (currentPrefix) {
+                if (currentComponents.prefix) {
                     logContainer.warn(
                         "No tags found with existing prefix: '" +
-                            currentPrefix +
+                            currentComponents.prefix +
                             "'; check your regex filters",
                     );
                 } else {
                     logContainer.warn(
-                        'No tags found starting with a number (no prefix); check your regex filters',
+                        'No tags found matching current channel; check your regex filters',
                     );
                 }
             }
@@ -165,18 +187,14 @@ function getTagCandidates(
                 null,
         );
 
-        // Remove prefix and suffix (keep only digits and dots)
-        const numericPart = container.image.tag.value.match(/(\d+(\.\d+)*)/);
-
-        if (numericPart) {
-            const referenceGroups = numericPart[0].split('.').length;
+        // Keep only tags with the same number of numeric segments
+        if (currentComponents.version) {
+            const referenceGroups = currentComponents.version.split('.').length;
 
             filteredTags = filteredTags.filter((tag) => {
-                const tagNumericPart = tag.match(/(\d+(\.\d+)*)/);
-                if (!tagNumericPart) return false; // skip tags without numeric part
-                const tagGroups = tagNumericPart[0].split('.').length;
-
-                // Keep only tags with the same number of numeric segments
+                const tagComp = extractTagComponents(tag);
+                if (!tagComp.version) return false;
+                const tagGroups = tagComp.version.split('.').length;
                 return tagGroups === referenceGroups;
             });
         }
@@ -256,11 +274,18 @@ function pruneOldContainers(
     });
 }
 
-function getContainerName(container: any) {
+export function getContainerName(container: any) {
+    if (!container) {
+        return '';
+    }
     let containerName = '';
     const names = container.Names;
     if (names && names.length > 0) {
         [containerName] = names;
+    } else if (container.Name) {
+        containerName = container.Name;
+    } else if (container.name) {
+        containerName = container.name;
     }
     // Strip ugly forward slash
     containerName = containerName.replace(/\//, '');
@@ -288,15 +313,24 @@ function getRepoDigest(containerImage: any) {
  * Priority order:
  *   1. an explicit `wud.watch` label always wins (infrastructure as code)
  *   2. otherwise the preference recorded from the UI, when one is set
- *   3. otherwise the watcher default
+ *   3. otherwise, if an exclude regex is configured on the watcher and the
+ *      container name matches it, the container is NOT watched (return false)
+ *   4. otherwise the watcher default
  *
  * @param wudWatchLabelValue the value of the wud.watch label
  * @param watchByDefault true if containers must be watched by default
- * @param preference the UI preference, undefined when none is set
+ * @param containerName the name of the container
+ * @param excludeRegex optional regex pattern to exclude containers by name
+ * @param log optional logger to log invalid regex warnings
+ * @param preference the UI preference, undefined when none is set (kept as
+ *   the last parameter to preserve upstream's positional signature)
  */
-function isContainerToWatch(
-    wudWatchLabelValue: string,
-    watchByDefault: boolean,
+export function isContainerToWatch(
+    wudWatchLabelValue?: string,
+    watchByDefault = true,
+    containerName?: string,
+    excludeRegex?: string,
+    log?: Pick<Logger, 'warn'>,
     preference?: boolean,
 ) {
     if (wudWatchLabelValue !== undefined && wudWatchLabelValue !== '') {
@@ -304,6 +338,20 @@ function isContainerToWatch(
     }
     if (preference !== undefined) {
         return preference;
+    }
+    if (excludeRegex && containerName) {
+        try {
+            const regex = new RegExp(excludeRegex);
+            if (regex.test(containerName)) {
+                return false;
+            }
+        } catch (e: any) {
+            if (log) {
+                log.warn(
+                    `Invalid exclude regex '${excludeRegex}': ${e.message}`,
+                );
+            }
+        }
     }
     return watchByDefault;
 }
@@ -353,6 +401,7 @@ export class Docker extends Watcher {
             watchevents: this.joi.boolean().default(true),
             watchatstart: this.joi.boolean().default(true),
             delay: this.joi.string().optional(),
+            exclude: this.joi.string().optional(),
         });
     }
 
@@ -366,6 +415,15 @@ export class Docker extends Watcher {
                 "WUD_WATCHER_{watcher_name}_WATCHDIGEST environment variable is deprecated and won't be supported in upcoming versions",
             );
         }
+
+        // One-shot mode: run a single scan, never schedule background tasks
+        if (isOneshot()) {
+            this.log.info(
+                'One-shot mode: cron, watch at start and docker events are disabled',
+            );
+            return;
+        }
+
         this.log.info(`Cron scheduled (${this.configuration.cron})`);
         this.watchCron = cron.schedule(
             this.configuration.cron,
@@ -456,6 +514,7 @@ export class Docker extends Watcher {
                     'unpause',
                     'die',
                     'update',
+                    'rename',
                 ],
             },
         };
@@ -507,7 +566,12 @@ export class Docker extends Watcher {
                 const container =
                     await this.dockerApi.getContainer(containerId);
                 const containerInspect = await container.inspect();
-                const newStatus = containerInspect.State.Status;
+                const newStatus = containerInspect.State?.Status;
+                const newName =
+                    getContainerName(containerInspect) ||
+                    (dockerEvent.Actor?.Attributes?.name
+                        ? dockerEvent.Actor.Attributes.name.replace(/\//, '')
+                        : undefined);
                 const containerFound = storeContainer.getContainer(containerId);
                 if (containerFound) {
                     // Child logger for the container to process
@@ -515,12 +579,25 @@ export class Docker extends Watcher {
                         container: fullName(containerFound),
                     });
                     const oldStatus = containerFound.status;
-                    containerFound.status = newStatus;
-                    if (oldStatus !== newStatus) {
-                        storeContainer.updateContainer(containerFound);
+                    const oldName = containerFound.name;
+                    let isUpdated = false;
+
+                    if (newStatus && oldStatus !== newStatus) {
+                        containerFound.status = newStatus;
                         logContainer.info(
                             `Status changed from ${oldStatus} to ${newStatus}`,
                         );
+                        isUpdated = true;
+                    }
+                    if (newName && oldName !== newName) {
+                        containerFound.name = newName;
+                        logContainer.info(
+                            `Name changed from ${oldName} to ${newName}`,
+                        );
+                        isUpdated = true;
+                    }
+                    if (isUpdated) {
+                        storeContainer.updateContainer(containerFound);
                     }
                 }
             } catch (e: any) {
@@ -644,8 +721,11 @@ export class Docker extends Watcher {
         const watchPreferences = storeWatchPreference.getWatchedMap(this.name);
         const filteredContainers = containers.filter((container) =>
             isContainerToWatch(
-                container.Labels[wudWatch],
+                container.Labels ? container.Labels[wudWatch] : undefined,
                 this.configuration.watchbydefault,
+                getContainerName(container),
+                this.configuration.exclude,
+                this.log,
                 watchPreferences.get(getContainerName(container)),
             ),
         );
@@ -676,16 +756,19 @@ export class Docker extends Watcher {
             (imagePromise) => imagePromise !== undefined,
         );
 
-        // Prune old containers from the store
-        try {
-            const containersFromTheStore = storeContainer.getContainers({
-                watcher: this.name,
-            });
-            pruneOldContainers(containersToReturn, containersFromTheStore);
-        } catch (e: any) {
-            this.log.warn(
-                `Error when trying to prune the old containers (${e.message})`,
-            );
+        // Prune old containers from the store (never in one-shot mode:
+        // the store is not initialized and there is no previous state)
+        if (!isOneshot()) {
+            try {
+                const containersFromTheStore = storeContainer.getContainers({
+                    watcher: this.name,
+                });
+                pruneOldContainers(containersToReturn, containersFromTheStore);
+            } catch (e: any) {
+                this.log.warn(
+                    `Error when trying to prune the old containers (${e.message})`,
+                );
+            }
         }
         this.updatePrometheusGauge(containersToReturn);
 
@@ -734,6 +817,9 @@ export class Docker extends Watcher {
                 watched: isContainerToWatch(
                     labelValue,
                     this.configuration.watchbydefault,
+                    name,
+                    this.configuration.exclude,
+                    this.log,
                     preference,
                 ),
                 watchedBy: getWatchSource(labelValue, preference),
@@ -829,6 +915,46 @@ export class Docker extends Watcher {
                     container.image.digest.value =
                         image.Config.Image || image.Id;
                 }
+
+                // An update was found? Resolve what is actually IN it.
+                // A digest-only update is unreadable on its own ("sha A -> sha B"),
+                // but the remote version label and build date both live in the
+                // image config blob.
+                if (
+                    remoteDigest.version === 2 &&
+                    result.digest !== undefined &&
+                    container.image.digest.value !== result.digest
+                ) {
+                    // A pending update stays pending until the user applies it,
+                    // so resolve each remote digest ONCE and reuse it afterwards.
+                    // Without this, every scan would re-request the config of an
+                    // update that is already known -- unwanted traffic against
+                    // registries that rate limit anonymous pulls (Docker Hub
+                    // allows 100 per 6h per IP, and manifest GETs count).
+                    const previousResult = storeContainer.getContainer(
+                        container.id,
+                    )?.result;
+                    if (previousResult?.digest === result.digest) {
+                        result.created = previousResult.created;
+                        result.version = previousResult.version;
+                    } else {
+                        try {
+                            const remoteConfig =
+                                await registryProvider.getImageConfig(
+                                    imageToGetDigestFrom,
+                                    result.digest,
+                                    remoteDigest.configDigest,
+                                );
+                            result.created =
+                                remoteConfig.created ?? result.created;
+                            result.version = remoteConfig.version;
+                        } catch (e: any) {
+                            logContainer.debug(
+                                `Cannot get remote image config (${e.message})`,
+                            );
+                        }
+                    }
+                }
             }
 
             // The first one in the array is the highest
@@ -837,6 +963,13 @@ export class Docker extends Watcher {
             }
         }
         return result;
+    }
+
+    /**
+     * Get container name.
+     */
+    getContainerName(container: any) {
+        return getContainerName(container);
     }
 
     /**
@@ -866,17 +999,44 @@ export class Docker extends Watcher {
             this.configuration.delay;
 
         // Is container already in store? just return it :)
-        const containerInStore = storeContainer.getContainer(containerId);
+        // One-shot mode: never read from the store (not initialized).
+        // stack/delay are never re-read from a previous state.
+        const containerInStore = isOneshot()
+            ? undefined
+            : storeContainer.getContainer(containerId);
         if (
             containerInStore !== undefined &&
             containerInStore.error === undefined
         ) {
             this.log.debug(`Container ${containerInStore.id} already in store`);
+            let isUpdated = false;
+            if (containerInStore.watcher !== this.name) {
+                containerInStore.watcher = this.name;
+                isUpdated = true;
+            }
             if (stack && !containerInStore.stack) {
                 containerInStore.stack = stack;
+                isUpdated = true;
             }
             if (delay && containerInStore.delay !== delay) {
                 containerInStore.delay = delay;
+                isUpdated = true;
+            }
+            const currentContainerName = this.getContainerName(container);
+            if (
+                currentContainerName &&
+                containerInStore.name !== currentContainerName
+            ) {
+                if (this.log && typeof this.log.info === 'function') {
+                    this.log.info(
+                        `Container ${containerInStore.id} renamed from ${containerInStore.name} to ${currentContainerName}`,
+                    );
+                }
+                containerInStore.name = currentContainerName;
+                isUpdated = true;
+            }
+            if (isUpdated) {
+                storeContainer.updateContainer(containerInStore);
             }
             return containerInStore;
         }
@@ -1004,6 +1164,15 @@ export class Docker extends Watcher {
      * Process a Container with result and map to a containerReport.
      */
     mapContainerToContainerReport(containerWithResult: Container) {
+        // One-shot mode: stateless, no store read/write.
+        // changed === updateAvailable ("update available right now").
+        if (isOneshot()) {
+            return {
+                container: containerWithResult,
+                changed: containerWithResult.updateAvailable,
+            };
+        }
+
         const logContainer = this.log.child({
             container: fullName(containerWithResult),
         });

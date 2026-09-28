@@ -10,9 +10,15 @@ import {
 import { Container, flatten } from '../../../model/container';
 import * as containerStore from '../../../store/container';
 import * as registry from '../../../registry';
+import {
+    getAssociatedTriggerIds,
+    sortTriggersByTypeAndName,
+    UPDATE_TRIGGER_TYPES,
+} from '../../associatedTriggers';
 import Watcher from '../../../watchers/Watcher';
 import { MqqtConfiguration as MqttConfiguration } from './Mqtt';
 import { Logger } from 'pino';
+import { isOneshot } from '../../../runtime/mode';
 
 const HASS_MANUFACTURER = 'wud';
 const HASS_ENTITY_VALUE_TEMPLATE = '{{ value_json.image_tag_value }}';
@@ -135,46 +141,50 @@ class Hass {
             this.removeContainerSensor(container),
         );
         // Subscribe to watcher events to sync HA
-        registerWatcherStart((watcher) =>
-            this.updateWatcherSensors({ watcher, isRunning: true }),
-        );
-        registerWatcherStop(async (watcher) => {
-            await this.updateWatcherSensors({ watcher, isRunning: false });
-            await this.updateContainerSensors({
-                watcher: watcher.name,
-            } as Container);
-        });
-
-        // Subscribe to install command pattern
-        if (typeof this.client.subscribe === 'function') {
-            this.client.subscribe(`${this.configuration.topic}/+/+/install`);
-        }
-        if (typeof this.client.on === 'function') {
-            this.client.on('message', async (topic, message) => {
-                const prefix = `${this.configuration.topic}/`;
-                const suffix = '/install';
-                if (
-                    topic.startsWith(prefix) &&
-                    topic.endsWith(suffix) &&
-                    message &&
-                    message.toString() === 'INSTALL'
-                ) {
-                    const middle = topic.substring(
-                        prefix.length,
-                        topic.length - suffix.length,
-                    );
-                    const parts = middle.split('/');
-                    if (parts.length === 2) {
-                        await this.handleInstallCommand(topic);
-                    }
-                }
+        if (!isOneshot()) {
+            registerWatcherStart((watcher) =>
+                this.updateWatcherSensors({ watcher, isRunning: true }),
+            );
+            registerWatcherStop(async (watcher) => {
+                await this.updateWatcherSensors({ watcher, isRunning: false });
+                await this.updateContainerSensors({
+                    watcher: watcher.name,
+                } as Container);
             });
-        }
 
-        // Publish global sensors once at startup if containers exist
-        const containers = containerStore.getContainers();
-        if (containers && containers.length > 0) {
-            await this.updateContainerSensors(containers[0]);
+            // Subscribe to install command pattern
+            if (typeof this.client.subscribe === 'function') {
+                this.client.subscribe(
+                    `${this.configuration.topic}/+/+/install`,
+                );
+            }
+            if (typeof this.client.on === 'function') {
+                this.client.on('message', async (topic, message) => {
+                    const prefix = `${this.configuration.topic}/`;
+                    const suffix = '/install';
+                    if (
+                        topic.startsWith(prefix) &&
+                        topic.endsWith(suffix) &&
+                        message &&
+                        message.toString() === 'INSTALL'
+                    ) {
+                        const middle = topic.substring(
+                            prefix.length,
+                            topic.length - suffix.length,
+                        );
+                        const parts = middle.split('/');
+                        if (parts.length === 2) {
+                            await this.handleInstallCommand(topic);
+                        }
+                    }
+                });
+            }
+
+            // Publish global sensors once at startup if containers exist
+            const containers = containerStore.getContainers();
+            if (containers && containers.length > 0) {
+                await this.updateContainerSensors(containers[0]);
+            }
         }
     }
 
@@ -538,13 +548,41 @@ class Hass {
                 JSON.stringify({ ...flatten(container), in_progress: true }),
                 { retain: true },
             );
-            const triggers = Object.values(registry.getState().trigger).filter(
-                (trigger) =>
-                    trigger.type === 'docker' ||
-                    trigger.type === 'dockercompose',
+            // Only fire triggers actually associated with this container
+            // (honoring wud.trigger.include/exclude label scoping, same as
+            // the web UI's own Update dialog), and only among trigger types
+            // capable of performing an update. Firing more than one at once
+            // could double-update the container, so pick a single trigger
+            // the same way the UI defaults its dropdown: prefer docker /
+            // dockercompose, otherwise fall back to whichever is associated.
+            // Sorted by (type, name) first - the registry map itself has no
+            // guaranteed order, so without sorting, a tie between two
+            // equally-associated triggers (e.g. two command triggers) would
+            // be resolved by component registration order rather than
+            // matching the web UI's own (sorted) default selection.
+            const associatedTriggerIds = getAssociatedTriggerIds(container);
+            const updateTriggers = sortTriggersByTypeAndName(
+                Object.entries(registry.getState().trigger)
+                    .filter(
+                        ([id, trigger]) =>
+                            associatedTriggerIds.has(id) &&
+                            UPDATE_TRIGGER_TYPES.includes(trigger.type),
+                    )
+                    .map(([, trigger]) => trigger),
             );
-            for (const trigger of triggers) {
-                await trigger.trigger(container);
+            const updateTrigger =
+                updateTriggers.find(
+                    (trigger) =>
+                        trigger.type === 'docker' ||
+                        trigger.type === 'dockercompose',
+                ) || updateTriggers[0];
+
+            if (updateTrigger) {
+                await updateTrigger.trigger(container);
+            } else {
+                this.log.warn(
+                    `No update trigger (${UPDATE_TRIGGER_TYPES.join('/')}) associated with container ${container.name}; ignoring install command`,
+                );
             }
         } catch (error) {
             this.log.error(

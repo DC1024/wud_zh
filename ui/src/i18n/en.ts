@@ -202,6 +202,8 @@ export default {
     snoozedText: "Version {version} is snoozed{until}.",
     tag: "Tag",
     semver: "semver",
+    version: "Version",
+    built: "Built",
     link: "Link",
     digest: "Digest",
     kind: "Update kind",

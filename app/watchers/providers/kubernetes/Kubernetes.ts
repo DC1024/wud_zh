@@ -14,6 +14,8 @@ import {
     parse as parseSemver,
     isGreater as isGreaterSemver,
     transform as transformTag,
+    extractTagComponents,
+    isPrerelease,
 } from '../../../tag';
 import * as event from '../../../event';
 import {
@@ -37,6 +39,7 @@ import {
     Container,
 } from '../../../model/container';
 import * as registry from '../../../registry';
+import { isOneshot } from '../../../runtime/mode';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
 import { ComponentConfiguration } from '../../../registry/Component';
@@ -248,6 +251,13 @@ export class Kubernetes extends Watcher {
     async init() {
         this.initK8sClient();
 
+        if (isOneshot()) {
+            this.log.info(
+                'One-shot mode: cron and watch at start are disabled',
+            );
+            return;
+        }
+
         this.log.info(`Cron scheduled (${this.configuration.cron})`);
         this.watchCron = cron.schedule(
             this.configuration.cron,
@@ -425,16 +435,19 @@ export class Kubernetes extends Watcher {
             (result) => !(result instanceof Error) && result !== undefined,
         );
 
-        // Prune old containers from the store
-        try {
-            const containersFromStore = storeContainer.getContainers({
-                watcher: this.name,
-            });
-            pruneOldContainers(containersWithImage, containersFromStore);
-        } catch (e: any) {
-            this.log.warn(
-                `Error when trying to prune the old containers (${e.message})`,
-            );
+        // Prune old containers from the store (never in one-shot mode)
+        if (!isOneshot()) {
+            try {
+                const containersFromStore = storeContainer.getContainers({
+                    watcher: this.name,
+                });
+                pruneOldContainers(containersWithImage, containersFromStore);
+            } catch (e: unknown) {
+                const message = e instanceof Error ? e.message : String(e);
+                this.log.warn(
+                    `Error when trying to prune the old containers (${message})`,
+                );
+            }
         }
 
         this.updatePrometheusGauge(containersWithImage);
@@ -684,12 +697,19 @@ export class Kubernetes extends Watcher {
         );
 
         // Check if already in store (skip API call for image details)
-        const containerInStore = storeContainer.getContainer(containerId);
+        // One-shot mode: never read from the store (not initialized)
+        const containerInStore = isOneshot()
+            ? undefined
+            : storeContainer.getContainer(containerId);
         if (
             containerInStore !== undefined &&
             containerInStore.error === undefined
         ) {
             this.log.debug(`Container ${containerId} already in store`);
+            if (containerInStore.watcher !== this.name) {
+                containerInStore.watcher = this.name;
+                storeContainer.updateContainer(containerInStore);
+            }
             return containerInStore;
         }
 
@@ -896,27 +916,57 @@ export class Kubernetes extends Watcher {
                 );
             }
 
-            if (!container.includeTags) {
-                const currentTag = container.image.tag.value;
-                const match = currentTag.match(/^(.*?)(\d+.*)$/);
-                const currentPrefix = match ? match[1] : '';
+            const currentTag = container.image.tag.value;
+            const currentComponents = extractTagComponents(currentTag);
 
-                if (currentPrefix) {
+            // If user has not specified custom include regex:
+            if (!container.includeTags) {
+                // Retain prefix consistency
+                if (currentComponents.prefix) {
                     filteredTags = filteredTags.filter((tag) =>
-                        tag.startsWith(currentPrefix),
+                        tag.startsWith(currentComponents.prefix),
                     );
                 } else {
+                    // Retain only tags that start with a number (no prefix)
                     filteredTags = filteredTags.filter((tag) =>
                         /^\d/.test(tag),
                     );
                 }
 
-                if (filteredTags.length === 0) {
-                    logContainer.warn(
-                        currentPrefix
-                            ? `No tags found with existing prefix: '${currentPrefix}'; check your regex filters`
-                            : 'No tags found starting with a number (no prefix); check your regex filters',
+                // Exclude pre-releases if current tag is a stable release
+                if (!currentComponents.isPrerelease) {
+                    filteredTags = filteredTags.filter(
+                        (tag) => !isPrerelease(tag),
                     );
+                }
+
+                // Default flavor/suffix matching:
+                // if current tag has no flavor/distro suffix (e.g. 8, 18), only match candidate tags that also have no suffix (or matching suffix).
+                if (!currentComponents.flavor) {
+                    filteredTags = filteredTags.filter((tag) => {
+                        const tagComp = extractTagComponents(tag);
+                        return !tagComp.flavor;
+                    });
+                } else {
+                    filteredTags = filteredTags.filter((tag) => {
+                        const tagComp = extractTagComponents(tag);
+                        return tagComp.flavor === currentComponents.flavor;
+                    });
+                }
+
+                // Ensure we throw good errors when we've prefix-related issues
+                if (filteredTags.length === 0) {
+                    if (currentComponents.prefix) {
+                        logContainer.warn(
+                            "No tags found with existing prefix: '" +
+                                currentComponents.prefix +
+                                "'; check your regex filters",
+                        );
+                    } else {
+                        logContainer.warn(
+                            'No tags found matching current channel; check your regex filters',
+                        );
+                    }
                 }
             }
 
@@ -926,16 +976,16 @@ export class Kubernetes extends Watcher {
                     null,
             );
 
-            const numericPart =
-                container.image.tag.value.match(/(\d+(\.\d+)*)/);
-            if (numericPart) {
-                const referenceGroups = numericPart[0].split('.').length;
+            // Keep only tags with the same number of numeric segments
+            if (currentComponents.version) {
+                const referenceGroups =
+                    currentComponents.version.split('.').length;
+
                 filteredTags = filteredTags.filter((tag) => {
-                    const tagNumericPart = tag.match(/(\d+(\.\d+)*)/);
-                    if (!tagNumericPart) return false;
-                    return (
-                        tagNumericPart[0].split('.').length === referenceGroups
-                    );
+                    const tagComp = extractTagComponents(tag);
+                    if (!tagComp.version) return false;
+                    const tagGroups = tagComp.version.split('.').length;
+                    return tagGroups === referenceGroups;
                 });
             }
 
@@ -998,6 +1048,15 @@ export class Kubernetes extends Watcher {
      * Mirrors Docker.mapContainerToContainerReport().
      */
     mapContainerToContainerReport(containerWithResult: Container) {
+        // One-shot mode: stateless, no store read/write.
+        // changed === updateAvailable ("update available right now").
+        if (isOneshot()) {
+            return {
+                container: containerWithResult,
+                changed: containerWithResult.updateAvailable,
+            };
+        }
+
         const logContainer = this.log.child({
             container: fullName(containerWithResult),
         });

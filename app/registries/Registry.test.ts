@@ -1,5 +1,7 @@
 // @ts-nocheck
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import log from '../log';
 
 jest.mock('axios');
@@ -9,7 +11,7 @@ jest.mock('../prometheus/registry', () => ({
     }),
 }));
 
-import Registry from './Registry';
+import Registry, { getUserAgent } from './Registry';
 
 const registry = new Registry();
 registry.register('registry', 'hub', 'test', {});
@@ -215,6 +217,9 @@ test('getImageManifestDigest should return the manifest digest (not the config d
     ).resolves.toStrictEqual({
         version: 2,
         digest: 'manifest_digest',
+        // Already known from the manifest just fetched, so resolving the image
+        // config later costs one request instead of two.
+        configDigest: 'config_digest',
     });
     // The confirmation request must be made against the reference we already
     // fetched the manifest by (the tag here), never against the config digest.
@@ -271,6 +276,7 @@ test('getImageManifestDigest should resolve a manifest fetched directly by its o
     ).resolves.toStrictEqual({
         version: 2,
         digest: 'sha256:platformManifestDigest',
+        configDigest: 'config_digest',
     });
     expect(urlsCalled).toStrictEqual([
         'url/image/manifests/sha256:platformManifestDigest',
@@ -339,6 +345,177 @@ test('getImageManifestDigest should throw when no digest found', async () => {
     ).rejects.toEqual(new Error('Unexpected error; no manifest found'));
 });
 
+test('getUserAgent should return wud formatted user agent', () => {
+    expect(getUserAgent()).toMatch(/^wud\/.+/);
+    expect(Registry.getUserAgent()).toEqual(getUserAgent());
+});
+
+const imageConfigImage = {
+    name: 'image',
+    architecture: 'amd64',
+    os: 'linux',
+    tag: {
+        value: 'tag',
+    },
+    registry: {
+        url: 'url',
+    },
+};
+
+test('getImageConfig should return the created date and version label from the config blob', async () => {
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    const urlsCalled: string[] = [];
+    registryMocked.callRegistry = (options) => {
+        urlsCalled.push(options.url);
+        if (options.url === 'url/image/manifests/manifest_digest') {
+            return {
+                schemaVersion: 2,
+                mediaType: 'application/vnd.oci.image.manifest.v1+json',
+                config: {
+                    digest: 'config_digest',
+                    mediaType: 'application/vnd.oci.image.config.v1+json',
+                },
+            };
+        }
+        if (options.url === 'url/image/blobs/config_digest') {
+            return {
+                created: '2026-09-02T05:35:35.550810335Z',
+                config: {
+                    Labels: {
+                        'org.opencontainers.image.version': '2.3.7',
+                    },
+                },
+            };
+        }
+        throw new Error('Boom!');
+    };
+    await expect(
+        registryMocked.getImageConfig(imageConfigImage, 'manifest_digest'),
+    ).resolves.toStrictEqual({
+        created: '2026-09-02T05:35:35.550810335Z',
+        version: '2.3.7',
+    });
+    // The manifest is fetched by its own digest, then the config blob it points at.
+    expect(urlsCalled).toStrictEqual([
+        'url/image/manifests/manifest_digest',
+        'url/image/blobs/config_digest',
+    ]);
+});
+
+test('getImageConfig should not request an index media type (a manifest digest never resolves to an index)', async () => {
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    let acceptUsed;
+    registryMocked.callRegistry = (options) => {
+        if (options.url === 'url/image/manifests/manifest_digest') {
+            acceptUsed = options.headers.Accept;
+            return { config: { digest: 'config_digest' } };
+        }
+        return {};
+    };
+    await registryMocked.getImageConfig(imageConfigImage, 'manifest_digest');
+    expect(acceptUsed).toStrictEqual(
+        'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json',
+    );
+});
+
+test('getImageConfig should return undefined version when the image carries no version label', async () => {
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    registryMocked.callRegistry = (options) => {
+        if (options.url === 'url/image/manifests/manifest_digest') {
+            return { config: { digest: 'config_digest' } };
+        }
+        return {
+            created: '2026-09-02T05:35:35.550810335Z',
+            config: { Labels: { maintainer: 'someone' } },
+        };
+    };
+    await expect(
+        registryMocked.getImageConfig(imageConfigImage, 'manifest_digest'),
+    ).resolves.toStrictEqual({
+        created: '2026-09-02T05:35:35.550810335Z',
+        version: undefined,
+    });
+});
+
+test('getImageConfig should return undefined values when the config blob is empty', async () => {
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    registryMocked.callRegistry = (options) => {
+        if (options.url === 'url/image/manifests/manifest_digest') {
+            return { config: { digest: 'config_digest' } };
+        }
+        return {};
+    };
+    await expect(
+        registryMocked.getImageConfig(imageConfigImage, 'manifest_digest'),
+    ).resolves.toStrictEqual({
+        created: undefined,
+        version: undefined,
+    });
+});
+
+test('getImageConfig should treat an empty version label as undefined', async () => {
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    registryMocked.callRegistry = (options) => {
+        if (options.url === 'url/image/manifests/manifest_digest') {
+            return { config: { digest: 'config_digest' } };
+        }
+        // Built with `ARG VERSION` + `LABEL ...version=$VERSION` and no build arg.
+        return {
+            created: '2026-09-02T05:35:35.550810335Z',
+            config: { Labels: { 'org.opencontainers.image.version': '' } },
+        };
+    };
+    // Must be undefined, not '': the container schema rejects an empty string
+    // and the resulting throw would abort the whole watch cycle.
+    await expect(
+        registryMocked.getImageConfig(imageConfigImage, 'manifest_digest'),
+    ).resolves.toStrictEqual({
+        created: '2026-09-02T05:35:35.550810335Z',
+        version: undefined,
+    });
+});
+
+test('getImageConfig should skip the manifest request when the config digest is already known', async () => {
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    const urlsCalled: string[] = [];
+    registryMocked.callRegistry = (options) => {
+        urlsCalled.push(options.url);
+        return {
+            created: '2026-09-02T05:35:35.550810335Z',
+            config: { Labels: { 'org.opencontainers.image.version': '2.3.7' } },
+        };
+    };
+    await expect(
+        registryMocked.getImageConfig(
+            imageConfigImage,
+            'manifest_digest',
+            'config_digest',
+        ),
+    ).resolves.toStrictEqual({
+        created: '2026-09-02T05:35:35.550810335Z',
+        version: '2.3.7',
+    });
+    // Only the blob is fetched; the manifest was already read by the caller.
+    expect(urlsCalled).toStrictEqual(['url/image/blobs/config_digest']);
+});
+
+test('getImageConfig should throw when the manifest has no config digest', async () => {
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    registryMocked.callRegistry = () => ({ schemaVersion: 2 });
+    await expect(
+        registryMocked.getImageConfig(imageConfigImage, 'manifest_digest'),
+    ).rejects.toEqual(
+        new Error('No config digest found in manifest manifest_digest'),
+    );
+});
+
 test('callRegistry should call authenticate', async () => {
     axios.mockResolvedValue({ data: {} });
     const registryMocked = new Registry();
@@ -350,6 +527,117 @@ test('callRegistry should call authenticate', async () => {
         method: 'get',
     });
     expect(spyAuthenticate).toHaveBeenCalledTimes(1);
+});
+
+test('callRegistry should send User-Agent header with wud version', async () => {
+    axios.mockResolvedValue({ data: {} });
+    const registryMocked = new Registry();
+    registryMocked.log = log;
+    await registryMocked.callRegistry({
+        image: {},
+        url: 'https://registry.example.com/v2/',
+        method: 'get',
+    });
+    expect(axios).toHaveBeenCalledWith(
+        expect.objectContaining({
+            headers: expect.objectContaining({
+                'User-Agent': getUserAgent(),
+            }),
+        }),
+    );
+});
+
+describe('proxy handling', () => {
+    const originalEnv = { ...process.env };
+
+    beforeEach(() => {
+        delete process.env.HTTP_PROXY;
+        delete process.env.HTTPS_PROXY;
+        delete process.env.http_proxy;
+        delete process.env.https_proxy;
+        delete process.env.NO_PROXY;
+        delete process.env.no_proxy;
+        axios.mockClear();
+    });
+
+    afterAll(() => {
+        process.env = originalEnv;
+    });
+
+    test('callRegistry should use HttpsProxyAgent when registry has proxy configured', async () => {
+        axios.mockResolvedValue({ data: {} });
+        const registryMocked = new Registry();
+        registryMocked.log = log;
+        registryMocked.configuration = {
+            proxy: 'http://custom-proxy:3128',
+        };
+        await registryMocked.callRegistry({
+            image: {},
+            url: 'https://registry-1.docker.io/v2/',
+            method: 'get',
+        });
+        expect(axios).toHaveBeenCalledWith(
+            expect.objectContaining({
+                httpsAgent: expect.any(HttpsProxyAgent),
+                proxy: false,
+            }),
+        );
+    });
+
+    test('callRegistry should use HttpsProxyAgent when HTTPS_PROXY environment variable is set', async () => {
+        process.env.HTTPS_PROXY = 'http://corp-proxy:3128';
+        axios.mockResolvedValue({ data: {} });
+        const registryMocked = new Registry();
+        registryMocked.log = log;
+        await registryMocked.callRegistry({
+            image: {},
+            url: 'https://registry-1.docker.io/v2/',
+            method: 'get',
+        });
+        expect(axios).toHaveBeenCalledWith(
+            expect.objectContaining({
+                httpsAgent: expect.any(HttpsProxyAgent),
+                proxy: false,
+            }),
+        );
+    });
+
+    test('callRegistry should use SocksProxyAgent when proxy URL is socks', async () => {
+        process.env.HTTPS_PROXY = 'socks5://corp-proxy:1080';
+        axios.mockResolvedValue({ data: {} });
+        const registryMocked = new Registry();
+        registryMocked.log = log;
+        await registryMocked.callRegistry({
+            image: {},
+            url: 'https://registry-1.docker.io/v2/',
+            method: 'get',
+        });
+        expect(axios).toHaveBeenCalledWith(
+            expect.objectContaining({
+                httpsAgent: expect.any(SocksProxyAgent),
+                httpAgent: expect.any(SocksProxyAgent),
+                proxy: false,
+            }),
+        );
+    });
+
+    test('callRegistry should not use proxy when NO_PROXY matches registry URL', async () => {
+        process.env.HTTPS_PROXY = 'http://corp-proxy:3128';
+        process.env.NO_PROXY = '.docker.io,localhost';
+        axios.mockResolvedValue({ data: {} });
+        const registryMocked = new Registry();
+        registryMocked.log = log;
+        await registryMocked.callRegistry({
+            image: {},
+            url: 'https://registry-1.docker.io/v2/',
+            method: 'get',
+        });
+        expect(axios).toHaveBeenCalledWith(
+            expect.not.objectContaining({
+                proxy: false,
+            }),
+        );
+    });
 });
 
 describe('registry request throttling', () => {
@@ -393,6 +681,22 @@ describe('registry request throttling', () => {
         ).toThrow();
         expect(() =>
             registryMocked.validateConfiguration({ concurrency: 1.5 }),
+        ).toThrow();
+    });
+
+    test('should validate optional proxy configuration', () => {
+        const registryMocked = new Registry();
+
+        expect(
+            registryMocked.validateConfiguration({
+                proxy: 'http://proxy.example.com:8080',
+            }),
+        ).toEqual({
+            concurrency: 2,
+            proxy: 'http://proxy.example.com:8080',
+        });
+        expect(() =>
+            registryMocked.validateConfiguration({ proxy: 'invalid-url' }),
         ).toThrow();
     });
 
