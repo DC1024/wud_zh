@@ -4,9 +4,12 @@ name: Build and push WUD (zh-CN) image
 on:
   push:
     branches: ["i18n-zh"]
-    # 纯文档改动不需要重建镜像
+    # 纯文档 / CI 配置改动不需要重建镜像（改工作流本身不会影响镜像内容，
+    # 语法错误会在下一次真实代码推送时暴露）
     paths-ignore:
       - "**.md"
+      - "docs/**"
+      - ".github/**"
       - "website/**"
       - "grafana/**"
   workflow_dispatch:

@@ -55,13 +55,15 @@
 > **本仓库是 [getwud/wud](https://github.com/getwud/wud) 的简体中文本地化分支（fork）。**
 > 上游版权与许可是 [MIT](LICENSE)，本分支的全部改动同样以 MIT 发布。
 
+> 📄 **想先看全貌？** 汉化内容与「相对原版的 5 项改进」有一页图文说明：[`docs/index.html`](docs/index.html)（单文件、零依赖，直接双击打开即可；也可以在 Pages 上访问 `https://dc1024.github.io/wud_zh/`）。
+
 | | |
 |---|---|
 | 分支 | **`i18n-zh`** |
 | 仓库名 | **`DC1024/wud_zh`**（原名 `DC1024/wud`，已更名；镜像同步改为 `ghcr.io/dc1024/wud_zh`） |
 | 预构建镜像 | **`ghcr.io/dc1024/wud_zh:latest`**（公开，无需登录即可拉取） |
 | 基于上游版本 | `9.2.0` |
-| 改动规模 | 41 个文件，+2957 / −267（主体是 `ui/` 前端；另含一项后端增强「监控清单」，向后兼容、不改上游行为） |
+| 改动规模 | 62 个文件，+6515 / −361，其中 10 个新增文件（主体是 `ui/` 前端；另含一项后端增强「监控清单」，向后兼容、不改上游行为） |
 
 ### 🚀 直接使用汉化镜像
 
@@ -106,12 +108,15 @@ Docker Compose 同理，只改一行：
 | 文件 | 作用 |
 |---|---|
 | `ui/src/i18n/index.ts` | i18n 入口：默认语言、读写 `wud-lang`、导出 `currentLocale` / `setLocale()`、同步 `<html lang>` |
-| `ui/src/i18n/zh-CN.ts` | 简体中文消息包（15 个命名空间 / 279 条） |
-| `ui/src/i18n/en.ts` | 英文消息包（与中文包键位对称，279 条） |
+| `ui/src/i18n/zh-CN.ts` | 简体中文消息包（17 个命名空间 / 364 条） |
+| `ui/src/i18n/en.ts` | 英文消息包（与中文包键位对称，364 条） |
 | `ui/src/views/WatchlistView.vue` | 监控清单页面（列表 + 勾选 + 来源标识 + 待生效提示） |
+| `ui/src/components/HubMirrorsEditor.vue` | Docker Hub 镜像源列表编辑器（增删排序 + 连通性探测） |
 | `ui/src/services/mock/data/discovered.ts` | 监控清单页的演示数据（复刻三态语义） |
 | `app/store/watchPreference.ts` | 监控偏好读写层（`watched_containers` 表，三态语义 + fail-safe） |
 | `app/store/watchPreference.test.ts` | 上述 store 的单元测试（11 个用例） |
+| `app/store/hubMirror.ts` | 镜像源列表的存储与连通性探测 |
+| `docs/index.html` | 本分支的宣传落地页（单文件、零依赖，可直接开 GitHub Pages） |
 | `.github/workflows/docker-image.yml` | push 到 `i18n-zh` 时自动构建并推送 GHCR 镜像 |
 
 **修改文件**
@@ -210,7 +215,15 @@ services:
 
 ### ✅ 英文模式与原版逐字一致
 
-切回 English 时看到的文案**就是上游原文**，不是"回译的英文"。这一点有脚本核对：逐个回查上游源码，219 个键里 **196 条与上游逐字相同**（含大小写与标点），其余 23 条是本分支新增——语言切换按钮 2 条，监控清单页面 21 条（上游并没有这个页面）。
+切回 English 时看到的文案**就是上游原文**，不是"回译的英文"。这一点有脚本核对（把消息包的值按 `{占位符}` 切成字面片段，逐条回查上游 9.2.0 的 `ui/` 源码）：
+
+| 分类 | 条数 | 说明 |
+|---|---|---|
+| 上游已有界面 | 227 | 其中 **211 条逐字一致**（93%） |
+| 本分支新增界面 | 137 | 监控清单 54 / 服务器管理 55 / 镜像源 28 |
+| 合计 | 364 | 中英两份消息包各 364 条，键位完全对称 |
+
+差集 16 条已逐条核对：1 条是 HTML 实体写法差异（上游源码写 `&amp;`，消息包里是 `&`，渲染等价），14 条是挂在既有页面上的新入口文案（监控清单入口、语言切换、已知未监控区块），**1 条是真偏差**——首页的 `home.updatesAvailable` 丢了上游的复数 `s`（上游是 `update{{ n > 1 ? 's' : '' }}`，目前恒为单数），待修。
 
 为此还修正过 4 处汉化过程中产生的偏差，例如：登录按钮应还原为上游的 `Login`、复制提示需保留上游 `xxx copied to clipboard` 的类别前缀、暂缓弹窗正文应为 `Snooze update for <名称>:`。
 

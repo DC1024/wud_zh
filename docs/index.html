@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WUD 简体中文版 · wud_zh — 汉化 + 5 项上游没有的增强</title>
+<meta name="description" content="What's Up Docker? 的简体中文汉化分支：全站中文 + 一键切英文，另加监控清单、Docker Hub 多镜像源、跨机监控向导、阿里云 ACR 匿名鉴权。基于上游 9.2.0，环境变量/触发器/REST API 完全兼容。">
+<style>
+  :root{
+    --bg:#f6f8fc; --panel:#ffffff; --ink:#0d1b2a; --ink-2:#3d4f63; --muted:#6b7c93;
+    --line:#e3e9f2; --line-2:#eef2f8;
+    --blue:#2496ED; --blue-d:#0d6fc0; --blue-l:#eaf4fe;
+    --violet:#6d5efc; --violet-l:#f1efff;
+    --teal:#0d9488; --teal-l:#e7f7f5;
+    --amber:#c2751a; --amber-l:#fdf4e5;
+    --rose:#c2416b; --rose-l:#fdeef3;
+    --radius:16px; --radius-s:10px;
+    --shadow:0 1px 2px rgba(13,27,42,.05), 0 8px 24px -12px rgba(13,27,42,.16);
+    --shadow-l:0 2px 4px rgba(13,27,42,.05), 0 18px 44px -18px rgba(13,27,42,.24);
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth; scroll-padding-top:76px}
+  body{
+    margin:0; font-family:var(--sans); color:var(--ink); background:var(--bg);
+    line-height:1.7; -webkit-font-smoothing:antialiased; font-size:15.5px;
+  }
+  a{color:var(--blue-d); text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,kbd{font-family:var(--mono); font-size:.9em}
+  .wrap{max-width:1120px; margin:0 auto; padding:0 24px}
+  p code, li code, td code{background:#eef3f9; border:1px solid #dde6f0; border-radius:5px; padding:1px 5px; color:#1d3b57}
+
+  /* ---------- header ---------- */
+  header.top{
+    position:sticky; top:0; z-index:50; backdrop-filter:saturate(160%) blur(12px);
+    background:rgba(255,255,255,.86); border-bottom:1px solid var(--line);
+  }
+  .top .wrap{display:flex; align-items:center; gap:18px; height:64px}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:750; letter-spacing:-.01em; color:var(--ink); font-size:15.5px}
+  .brand:hover{text-decoration:none}
+  .brand .dot{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--blue),#5fb0f5);display:grid;place-items:center;box-shadow:0 2px 8px rgba(36,150,237,.35)}
+  .brand .dot svg{width:16px;height:16px;display:block}
+  nav.mid{display:flex; gap:22px; margin-left:auto; font-size:14px}
+  nav.mid a{color:var(--ink-2); font-weight:550}
+  nav.mid a:hover{color:var(--blue-d); text-decoration:none}
+  .gh{display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 13px; border:1px solid var(--line);
+      border-radius:9px; background:#fff; font-size:13.5px; font-weight:600; color:var(--ink); box-shadow:var(--shadow)}
+  .gh:hover{text-decoration:none; border-color:#cfdaea; transform:translateY(-1px)}
+  @media(max-width:820px){ nav.mid{display:none} }
+
+  /* ---------- hero ---------- */
+  .hero{position:relative; overflow:hidden; padding:66px 0 54px;
+    background:
+      radial-gradient(1100px 420px at 12% -12%, #e6f2ff 0%, rgba(230,242,255,0) 62%),
+      radial-gradient(900px 380px at 92% 4%, #efeaff 0%, rgba(239,234,255,0) 60%),
+      linear-gradient(180deg,#ffffff 0%, var(--bg) 100%);
+  }
+  .hero::after{content:""; position:absolute; inset:0; pointer-events:none; opacity:.5;
+    background-image:linear-gradient(#e9eff8 1px,transparent 1px),linear-gradient(90deg,#e9eff8 1px,transparent 1px);
+    background-size:44px 44px; mask-image:radial-gradient(760px 380px at 50% 0%,#000 0%,transparent 78%);
+    -webkit-mask-image:radial-gradient(760px 380px at 50% 0%,#000 0%,transparent 78%);}
+  .hero .wrap{position:relative; z-index:2}
+  .kick{display:inline-flex; align-items:center; gap:8px; height:30px; padding:0 12px; border-radius:999px;
+    background:#fff; border:1px solid var(--line); box-shadow:var(--shadow); font-size:13px; font-weight:600; color:var(--ink-2)}
+  .kick .pulse{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 4px var(--teal-l)}
+  h1{font-size:clamp(30px,4.6vw,52px); line-height:1.16; letter-spacing:-.025em; margin:20px 0 0; font-weight:800}
+  h1 .grad{background:linear-gradient(100deg,var(--blue) 0%,var(--violet) 78%); -webkit-background-clip:text; background-clip:text; color:transparent}
+  .sub{font-size:17.5px; color:var(--ink-2); max-width:760px; margin:18px 0 0}
+  .sub b{color:var(--ink); font-weight:700}
+  .cta{display:flex; flex-wrap:wrap; gap:12px; margin-top:26px; align-items:center}
+  .btn{display:inline-flex; align-items:center; gap:9px; height:44px; padding:0 20px; border-radius:11px;
+    font-weight:650; font-size:14.5px; border:1px solid transparent; cursor:pointer; transition:.16s}
+  .btn.primary{background:linear-gradient(180deg,#2f9df0,#1a83d8); color:#fff; box-shadow:0 6px 18px -6px rgba(36,150,237,.7)}
+  .btn.primary:hover{text-decoration:none; transform:translateY(-1px); box-shadow:0 10px 24px -8px rgba(36,150,237,.8)}
+  .btn.ghost{background:#fff; border-color:var(--line); color:var(--ink); box-shadow:var(--shadow)}
+  .btn.ghost:hover{text-decoration:none; border-color:#cfdaea; transform:translateY(-1px)}
+  .badges{display:flex; flex-wrap:wrap; gap:8px; margin-top:26px}
+  .badge{display:inline-flex; align-items:center; gap:7px; height:28px; padding:0 11px; border-radius:8px;
+    font-size:12.5px; font-weight:600; border:1px solid; background:#fff}
+  .badge svg{width:13px;height:13px}
+  .b-blue{color:var(--blue-d); border-color:#cfe6fb; background:var(--blue-l)}
+  .b-violet{color:#4f3fd6; border-color:#ddd8ff; background:var(--violet-l)}
+  .b-teal{color:#0a7a70; border-color:#c8ece7; background:var(--teal-l)}
+  .b-gray{color:var(--ink-2); border-color:var(--line); background:#fff}
+
+  /* ---------- stats ---------- */
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:44px}
+  @media(max-width:760px){ .stats{grid-template-columns:repeat(2,1fr)} }
+  .stat{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:18px 20px; box-shadow:var(--shadow)}
+  .stat .n{font-size:29px; font-weight:800; letter-spacing:-.02em; line-height:1.15; font-variant-numeric:tabular-nums}
+  .stat .n small{font-size:15px; font-weight:700; color:var(--muted); margin-left:3px}
+  .stat .l{font-size:12.8px; color:var(--muted); margin-top:3px}
+  .stat.c-blue .n{color:var(--blue-d)} .stat.c-violet .n{color:#5a49e8}
+  .stat.c-teal .n{color:#0a7a70}   .stat.c-amber .n{color:var(--amber)}
+
+  /* ---------- generic section ---------- */
+  section{padding:72px 0; border-top:1px solid var(--line)}
+  section.alt{background:#fff}
+  .eyebrow{font-size:12.5px; font-weight:750; letter-spacing:.1em; text-transform:uppercase; color:var(--blue-d)}
+  h2{font-size:clamp(24px,3.1vw,34px); letter-spacing:-.02em; line-height:1.24; margin:10px 0 0; font-weight:800}
+  .lead{font-size:16.3px; color:var(--ink-2); max-width:800px; margin:14px 0 0}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:20px}
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:18px}
+  /* 网格/统计项默认 min-width:auto —— 内含表格或 <pre> 时会把整列撑破，必须显式归零 */
+  .grid2>*,.grid3>*,.stats>*,.vs>*{min-width:0}
+  @media(max-width:900px){ .grid2,.grid3{grid-template-columns:1fr} }
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:22px 24px; box-shadow:var(--shadow)}
+  .card h3{margin:0 0 8px; font-size:17px; letter-spacing:-.01em; display:flex; align-items:center; gap:9px}
+  .card p{margin:0; color:var(--ink-2); font-size:14.6px}
+  .card ul{margin:10px 0 0; padding-left:20px; color:var(--ink-2); font-size:14.5px}
+  .card li{margin:5px 0}
+  .ico{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;flex:none}
+  .ico svg{width:17px;height:17px}
+  .i-blue{background:var(--blue-l); color:var(--blue-d)}
+  .i-violet{background:var(--violet-l); color:#5a49e8}
+  .i-teal{background:var(--teal-l); color:#0a7a70}
+  .i-amber{background:var(--amber-l); color:var(--amber)}
+  .i-rose{background:var(--rose-l); color:var(--rose)}
+
+  /* ---------- tables ---------- */
+  table{width:100%; border-collapse:collapse; margin-top:18px; font-size:14.3px; background:#fff;
+    border:1px solid var(--line); border-radius:var(--radius-s); overflow:hidden}
+  th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--line-2); vertical-align:top}
+  thead th{background:#f8fafd; font-size:12.6px; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); font-weight:700; white-space:nowrap}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#fbfdff}
+  td.k{font-weight:650; color:var(--ink); white-space:nowrap}
+  /* 窄屏：表格自身成为滚动容器，避免把网格列 / 页面撑出横向滚动条 */
+  @media(max-width:900px){
+    table{display:block; overflow-x:auto; -webkit-overflow-scrolling:touch}
+    td.k{white-space:normal}
+    th,td{padding:10px 12px; overflow-wrap:anywhere}
+    thead th{white-space:normal}
+    p code, li code, td code{overflow-wrap:anywhere}
+  }
+
+  /* ---------- tag / pill ---------- */
+  .pill{display:inline-block; padding:2px 9px; border-radius:999px; font-size:12.2px; font-weight:650; border:1px solid}
+  .p-blue{color:var(--blue-d); background:var(--blue-l); border-color:#cfe6fb}
+  .p-teal{color:#0a7a70; background:var(--teal-l); border-color:#c8ece7}
+  .p-amber{color:var(--amber); background:var(--amber-l); border-color:#f6e3c4}
+  .p-rose{color:var(--rose); background:var(--rose-l); border-color:#f8d7e2}
+  .p-gray{color:var(--ink-2); background:#f4f7fb; border-color:var(--line)}
+
+  /* ---------- code ---------- */
+  .code{position:relative; background:#0e1b2c; border-radius:12px; overflow:hidden; margin-top:16px; border:1px solid #16273d}
+  .code .bar{display:flex; align-items:center; gap:8px; padding:9px 14px; background:#132339; border-bottom:1px solid #1b2f4a}
+  .code .bar .t{font-size:12.4px; color:#8ba4c2; font-family:var(--mono)}
+  .code .bar .cp{margin-left:auto; font-size:12px; color:#9fb6d2; background:#1b2f4a; border:1px solid #27405f;
+    border-radius:7px; padding:3px 10px; cursor:pointer; font-family:var(--sans)}
+  .code .bar .cp:hover{background:#24405f; color:#fff}
+  pre{margin:0; padding:16px 18px; overflow:auto; color:#dbe8f6; font-family:var(--mono); font-size:13.1px; line-height:1.75}
+  pre .c{color:#6f88a6}
+  pre .add{color:#7ee0b0}
+  pre .del{color:#ff9db4}
+  pre .s{color:#ffd479}
+  pre .k{color:#92c9ff}
+
+  /* ---------- language demo ---------- */
+  .demo{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow-l); overflow:hidden}
+  .demo .head{display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); background:#fbfdff}
+  .demo .head .ttl{font-size:13.4px; font-weight:700; color:var(--ink-2)}
+  .seg{margin-left:auto; display:flex; background:#eef3f9; border:1px solid var(--line); border-radius:9px; padding:3px}
+  .seg button{border:0; background:transparent; font-family:var(--sans); font-size:13px; font-weight:650; color:var(--ink-2);
+    padding:5px 14px; border-radius:7px; cursor:pointer; transition:.15s}
+  .seg button.on{background:#fff; color:var(--blue-d); box-shadow:0 1px 4px rgba(13,27,42,.12)}
+  .demo .body{padding:6px 0 0}
+  .row{display:flex; align-items:center; gap:12px; padding:11px 16px; border-bottom:1px solid var(--line-2); font-size:14px}
+  .row:last-child{border-bottom:none}
+  .row .nm{font-weight:650; min-width:132px; flex:none}
+  .row .im{font-family:var(--mono); font-size:12.5px; color:var(--muted);
+    flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .row .sp{margin-left:auto; flex:none; display:flex; align-items:center}
+  /* 行内元素上 width/height 无效 —— 开关必须 inline-block，否则只剩 ::after 的圆点露在外面 */
+  .sw{display:inline-block; width:38px;height:21px;border-radius:999px;background:#dfe7f1;position:relative;flex:none}
+  @media(max-width:560px){
+    .row{gap:9px; padding:11px 13px}
+    .row .nm{min-width:0}
+  }
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.16s}
+  .sw.on{background:var(--blue)} .sw.on::after{left:19px}
+  .muted{color:var(--muted)}
+  .demo .foot{padding:11px 16px; background:#fbfdff; border-top:1px solid var(--line); font-size:12.6px; color:var(--muted)}
+
+  /* ---------- compare ---------- */
+  .vs{display:grid; grid-template-columns:1fr 1fr; gap:0; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; margin-top:18px; background:#fff; box-shadow:var(--shadow)}
+  @media(max-width:820px){ .vs{grid-template-columns:1fr} }
+  .vs .col{padding:18px 22px}
+  .vs .col+.col{border-left:1px solid var(--line)}
+  @media(max-width:820px){ .vs .col+.col{border-left:none; border-top:1px solid var(--line)} }
+  .vs .h{font-size:12.6px; font-weight:750; letter-spacing:.06em; text-transform:uppercase; margin-bottom:10px; display:flex; align-items:center; gap:7px}
+  .vs .h.up{color:var(--muted)} .vs .h.fk{color:var(--blue-d)}
+  .vs ul{margin:0; padding-left:19px; font-size:14.3px; color:var(--ink-2)}
+  .vs li{margin:6px 0}
+  .vs .col.fk{background:linear-gradient(180deg,#fafdff,#fff)}
+
+  /* ---------- timeline / steps ---------- */
+  .steps{counter-reset:s; margin-top:20px}
+  .step{display:flex; gap:16px; padding:16px 0; border-bottom:1px dashed var(--line)}
+  .step:last-child{border-bottom:none}
+  .step .num{counter-increment:s; width:30px;height:30px;border-radius:9px;background:var(--blue-l);color:var(--blue-d);
+    display:grid;place-items:center;font-weight:750;font-size:14px;flex:none}
+  .step .num::before{content:counter(s)}
+  .step .tx h4{margin:2px 0 4px; font-size:15.4px}
+  .step .tx p{margin:0; color:var(--ink-2); font-size:14.4px}
+
+  .note{margin-top:18px; padding:14px 18px; border-radius:var(--radius-s); border:1px solid #f6e3c4; background:var(--amber-l);
+    font-size:14.3px; color:#7a4a0d}
+  .note b{color:#5f390a}
+  .note.ok{border-color:#c8ece7; background:var(--teal-l); color:#08544d}
+  .note.ok b{color:#063f3a}
+
+  footer{border-top:1px solid var(--line); background:#fff; padding:38px 0 52px; font-size:14px; color:var(--muted)}
+  footer .cols{display:flex; flex-wrap:wrap; gap:28px}
+  footer .cols>div{min-width:200px}
+  footer h5{margin:0 0 8px; font-size:12.6px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-2)}
+  footer a{color:var(--ink-2)} footer a:hover{color:var(--blue-d)}
+
+  .reveal{opacity:0; transform:translateY(14px); transition:opacity .6s ease, transform .6s cubic-bezier(.2,.7,.2,1)}
+  .reveal.in{opacity:1; transform:none}
+  @media(prefers-reduced-motion:reduce){ .reveal{opacity:1;transform:none;transition:none} html{scroll-behavior:auto} }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top">
+      <span class="dot">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M4 12h16M4 17h10"/>
+        </svg>
+      </span>
+      <span>WUD <span style="color:var(--muted);font-weight:600">简体中文版</span></span>
+    </a>
+    <nav class="mid">
+      <a href="#i18n">汉化内容</a>
+      <a href="#features">相对原版的改进</a>
+      <a href="#diff">改动规模</a>
+      <a href="#start">快速开始</a>
+    </nav>
+    <a class="gh" href="https://github.com/DC1024/wud_zh" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      DC1024/wud_zh
+    </a>
+  </div>
+</header>
+
+<!-- ================= HERO ================= -->
+<div class="hero" id="top">
+  <div class="wrap">
+    <span class="kick"><span class="pulse"></span> 基于上游 9.2.0 · 分支 i18n-zh · 持续跟进上游</span>
+    <h1>把 What's Up Docker?<br>完整讲成<span class="grad">中文</span>，<br>再补上它缺的 5 件事</h1>
+    <p class="sub">
+      <b>wud_zh</b> 是 <a href="https://github.com/getwud/wud" target="_blank" rel="noopener">getwud/wud</a> 的简体中文本地化分支：
+      全站中文界面、可一键切回英文，并在不破坏上游行为的前提下，补上了
+      <b>监控清单</b>、<b>Docker Hub 多镜像源</b>、<b>跨机监控向导</b>、<b>阿里云 ACR 匿名鉴权</b>。
+      换镜像名即可用，<b>环境变量 / 触发器 / 卷映射 / REST API 与上游完全一致</b>。
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#start">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 5l7 7-7 7"/></svg>
+        三行命令用起来
+      </a>
+      <a class="btn ghost" href="#features">看看比原版多了什么</a>
+    </div>
+    <div class="badges">
+      <span class="badge b-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg> 上游 9.2.0 为基线</span>
+      <span class="badge b-violet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 3v18M3 12h18"/></svg> 版本 wud_zh-beta1.4</span>
+      <span class="badge b-teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg> MIT · 公开可拉取</span>
+      <span class="badge b-gray">ghcr.io/dc1024/wud_zh:latest</span>
+      <span class="badge b-gray">amd64</span>
+    </div>
+
+    <div class="stats reveal">
+      <div class="stat c-blue">
+        <div class="n" data-count="364">0</div>
+        <div class="l">条界面文案已汉化</div>
+      </div>
+      <div class="stat c-violet">
+        <div class="n" data-count="17">0</div>
+        <div class="l">个 i18n 命名空间</div>
+      </div>
+      <div class="stat c-teal">
+        <div class="n" data-count="211">0<small>/227</small></div>
+        <div class="l">上游界面文案逐字回取</div>
+      </div>
+      <div class="stat c-amber">
+        <div class="n" data-count="5">0</div>
+        <div class="l">项上游没有的增强</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 汉化内容 ================= -->
+<section id="i18n">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Localization</div>
+      <h2>汉化内容：不是贴一层皮，是重做了一套 i18n</h2>
+      <p class="lead">
+        上游 WUD 的界面文案是<b>硬编码</b>在 17 个 Vue 文件里的英文串，没有任何 i18n 框架。
+        本分支引入了 <code>vue-i18n v10</code>，把散落的文案抽成两份<b>键位对称</b>的消息包，并接上了 Vuetify 的内置本地化。
+      </p>
+    </div>
+
+    <div class="grid2" style="margin-top:24px">
+      <div class="card reveal">
+        <h3><span class="ico i-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></svg></span>语言包结构</h3>
+        <p>两份消息包键位一一对应，改一处不会漏另一处。</p>
+        <table style="margin-top:12px">
+          <tbody>
+            <tr><td class="k">zh-CN.ts</td><td>简体中文消息包</td></tr>
+            <tr><td class="k">en.ts</td><td>英文消息包（值直接取自上游源码）</td></tr>
+            <tr><td class="k">命名空间</td><td>17 个（containers / watchlist / servers / config / hubMirrors …）</td></tr>
+            <tr><td class="k">叶子键</td><td><b>364</b> 条（中英各 364）</td></tr>
+            <tr><td class="k">index.ts</td><td>默认语言、读写 <code>wud-lang</code>、同步 <code>&lt;html lang&gt;</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card reveal">
+        <h3><span class="ico i-teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18-2.5-2.7-2.5-15.3 0-18Z"/></svg></span>汉化覆盖范围</h3>
+        <p>已汉化的界面：</p>
+        <ul>
+          <li>导航侧边栏、顶部栏、登录页</li>
+          <li>首页仪表盘（容器数 / 触发器 / 监视器 / 镜像仓库统计）</li>
+          <li>容器列表：筛选、分组、暂缓更新、删除确认弹窗</li>
+          <li>容器详情抽屉<b>全部子页</b>：更新 / 触发器 / 镜像 / 容器信息 / 错误</li>
+          <li>配置页：触发器、监视器、服务器与系统配置</li>
+          <li><b>监控清单</b>（本分支新增页面）</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:20px">
+      <div class="card reveal">
+        <h3><span class="ico i-violet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v5l3.5 2"/></svg></span>英文模式 = 上游原文，不是回译</h3>
+        <p>切回 English 看到的界面串，都是<b>照着上游源码原文取的</b>，不是"翻译回去的英文"（只把上游的模板插值改写成 <code>{占位符}</code>）。下面是脚本逐条回查上游 9.2.0 源码的实测结果：</p>
+        <table style="margin-top:12px">
+          <thead><tr><th>分类</th><th>条数</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td class="k">上游已有界面</td><td>227</td><td>其中 <b>211 条逐字一致</b>（93%），差集 16 条见下</td></tr>
+            <tr><td class="k">本分支新增界面</td><td>137</td><td>监控清单 54 / 服务器管理 55 / 镜像源 28 三个新增命名空间</td></tr>
+            <tr><td class="k">合计</td><td>364</td><td>中英两份消息包各 364 条，键位完全对称</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:12px" class="muted">那 16 条差集已逐条核对：1 条是 HTML 实体写法差异（上游 <code>&amp;amp;</code>、消息包里 <code>&amp;</code>，渲染等价），14 条是挂在既有页面上的新入口文案（监控清单入口、语言切换、已知未监控区块），<b>1 条是真偏差</b>——首页的复数句丢了上游的 <code>s</code>，已在仓库待办里记着。</p>
+        <p style="margin-top:12px" class="muted">汉化过程中还回修了 4 处偏差，例如登录按钮必须还原成上游的 <code>Login</code>、复制提示要保留 <code>xxx copied to clipboard</code> 的类别前缀。</p>
+      </div>
+
+      <div class="card reveal">
+        <h3><span class="ico i-amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>仍然保留英文的页面（诚实交代）</h3>
+        <p>上游的 6 个次要页面还没翻，功能完全正常，只是文案是英文：</p>
+        <p style="margin-top:10px">
+          <span class="pill p-gray">日志 Logs</span>
+          <span class="pill p-gray">个人资料 Profile</span>
+          <span class="pill p-gray">镜像仓库 Registries</span>
+          <span class="pill p-gray">认证 Authentications</span>
+          <span class="pill p-gray">用户 Users</span>
+          <span class="pill p-gray">状态 State</span>
+        </p>
+        <p style="margin-top:12px" class="muted">补翻很便宜：两份消息包同时加键 → 在 <code>.vue</code> 里把硬编码串换成 <code>$t('ns.key')</code> → push 到 <code>i18n-zh</code>，CI 自动重建镜像。</p>
+      </div>
+    </div>
+
+    <div class="reveal" style="margin-top:26px">
+      <h3 style="font-size:17px;margin:0 0 6px">语言切换入口</h3>
+      <p class="lead" style="margin-top:0">界面<b>默认简体中文</b>，两处入口随时切回 English；选择记在 <code>localStorage</code>（<code>wud-lang</code>），刷新和重新登录都保持。</p>
+      <table>
+        <thead><tr><th>入口</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="k">侧边栏底部 🌐 语言</td><td>已登录时的入口。侧栏收起显示为带悬浮提示的图标；展开显示为列表项，右侧标注当前语言（中文 / English）</td></tr>
+          <tr><td class="k">登录页卡片上方</td><td>未登录状态也能切换（<code>中文</code> / <code>English</code>）</td></tr>
+          <tr><td class="k">联动项</td><td>自动同步文档 <code>&lt;html lang&gt;</code>，以及 Vuetify 内置文案（表格分页、空状态等）一并跟随切换</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid2" style="margin-top:26px">
+      <div class="demo reveal">
+        <div class="head">
+          <span class="ttl">效果预览</span>
+          <div class="seg">
+            <button id="segZh" class="on" type="button">中文</button>
+            <button id="segEn" type="button">English</button>
+          </div>
+        </div>
+        <div class="body">
+          <div class="row">
+            <span class="nm" data-zh="容器" data-en="Containers">容器</span>
+            <span class="im">local</span>
+            <span class="sp"><span class="pill p-teal" data-zh="最新" data-en="Up to date">最新</span></span>
+          </div>
+          <div class="row">
+            <span class="nm" data-zh="监视容器" data-en="Watch List">监视容器</span>
+            <span class="im">watched_containers</span>
+            <span class="sp"><span class="sw on"></span></span>
+          </div>
+          <div class="row">
+            <span class="nm" data-zh="发现更新" data-en="Updates available">发现更新</span>
+            <span class="im">ollama/ollama</span>
+            <span class="sp"><span class="pill p-amber" data-zh="1 个更新" data-en="1 update">1 个更新</span></span>
+          </div>
+          <div class="row">
+            <span class="nm" data-zh="镜像源" data-en="Hub mirrors">镜像源</span>
+            <span class="im">docker.1panel.live</span>
+            <span class="sp"><span class="pill p-blue" data-zh="可达" data-en="reachable">可达</span></span>
+          </div>
+        </div>
+        <div class="foot" data-zh="切换只影响文案，功能与数据完全一致。" data-en="Switching only changes wording — behaviour and data stay identical.">切换只影响文案，功能与数据完全一致。</div>
+      </div>
+
+      <div class="card reveal">
+        <h3><span class="ico i-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v12H4z"/><path d="M8 20h8M12 16v4"/></svg></span>为什么值得重做 i18n</h3>
+        <p>WUD 是那种"更新一多就得天天看"的工具 —— 容器列表、触发器状态、错误信息全在界面上。母语界面的价值不是好看，是<b>看到 error 那一行的瞬间就能判断要不要动手</b>。</p>
+        <ul>
+          <li>错误信息本地化：容器详情里的错误子页整页中文</li>
+          <li>配置页汉化：触发器、监视器、服务器与系统配置</li>
+          <li>Vuetify 一并跟随：分页器、空状态、日期选择器都是中文</li>
+          <li>可回退：切英文即回到上游观感，排障时可对照官方文档</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 改进 ================= -->
+<section id="features" class="alt">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Beyond upstream</div>
+      <h2>相对原项目做的 5 项改进</h2>
+      <p class="lead">
+        汉化只是起点。下面这几条是上游当前版本没有、而中文用户几乎一定会撞上的问题 —— 尤其是<b>国内出口访问不到 Docker Hub</b> 这一条，会直接让 WUD 变成"全屏报错"。
+        所有改动都是<b>纯增量</b>：不改上游的环境变量、触发器与 REST API 行为。
+      </p>
+    </div>
+
+    <!-- 1 -->
+    <div class="grid2" style="margin-top:26px">
+      <div class="card reveal" style="padding:0;overflow:hidden">
+        <div style="padding:22px 24px 18px">
+          <h3><span class="ico i-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span>① Docker Hub 镜像源可配置 + 多源 failover</h3>
+          <p>上游把 Hub 地址<b>硬编码</b>为 <code>registry-1.docker.io</code> / <code>auth.docker.io/token</code>。国内出口这条链路会被 RST 重置（<code>ECONNRESET</code>），结果是<b>所有 Docker Hub 容器整片报错</b>、检测不了更新，而 GHCR、ECR 等其他源却一切正常 —— 这也是最难排查的一种"看起来是 WUD 坏了"。</p>
+        </div>
+        <table style="margin:0;border-left:0;border-right:0;border-bottom:0;border-radius:0">
+          <thead><tr><th>环境变量</th><th>作用</th><th>何时需要</th></tr></thead>
+          <tbody>
+            <tr><td class="k">WUD_REGISTRY_HUB_URL</td><td>仓库 API 基址（manifest / tags 拉取）</td><td>想走镜像站时必填</td></tr>
+            <tr><td class="k">…_AUTHURL</td><td>token 端点</td><td>匿名站不填；认证站填其 token 地址</td></tr>
+            <tr><td class="k">…_SERVICE</td><td>token 的 <code>service</code> 参数</td><td>认证站且 service 非默认值时才填</td></tr>
+          </tbody>
+        </table>
+        <div style="padding:16px 24px 20px">
+          <p class="muted" style="margin:0">默认值时与上游<b>逐字一致</b>，存量部署零影响。另提供网页版镜像列表编辑器：<b>按顺序逐个试，第一个通的即生效</b>，带连通性与鉴权类型探测。</p>
+        </div>
+      </div>
+
+      <div class="card reveal" style="padding:0;overflow:hidden">
+        <div style="padding:22px 24px 18px">
+          <h3><span class="ico i-violet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><path d="M17 15l2 2 3-3"/></svg></span>② 监控清单：在网页上勾选要监控谁</h3>
+          <p>上游只能靠 <code>wud.watch</code> <b>标签</b>决定监控范围 —— 想改一个容器就得改 compose 再重建。本分支加了一个页面：在网页上直接勾，<b>勾完点"立即生效"就下一次扫描生效</b>。</p>
+        </div>
+        <table style="margin:0;border-left:0;border-right:0;border-bottom:0;border-radius:0">
+          <thead><tr><th>优先级</th><th>来源</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td class="k">1</td><td><code>wud.watch</code> 标签</td><td>基础设施即代码，<b>始终最高</b>；打了标签的容器在页面上锁定</td></tr>
+            <tr><td class="k">2</td><td>网页勾选</td><td>存库，键为 <code>(watcher, 容器名)</code> —— 按<b>名字</b>而非容器 ID，因为重建后 ID 会变</td></tr>
+            <tr><td class="k">3</td><td><code>watchbydefault</code></td><td>都没设置才回落默认。<b>库里没记录 ≠ false</b>，否则老实例一升级就集体停止监控</td></tr>
+          </tbody>
+        </table>
+        <div style="padding:16px 24px 20px">
+          <p class="muted" style="margin:0">新增两个纯增量接口：<code>GET /api/containers/discover</code>（列出全部容器含未监控）、<code>PUT /api/containers/watch-preference</code>。另支持批量勾选、孤儿偏好清理、未监控容器折叠。</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2 -->
+    <div class="grid3" style="margin-top:20px">
+      <div class="card reveal">
+        <h3><span class="ico i-teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.6"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span>③ 服务器管理页</h3>
+        <p>跨机监控不再靠手拼环境变量。<code>/configuration/watchers</code> 升级为<b>服务器列表</b>（地址 / 端口 / 扫描计划 / 监控数 / 可达性），并带<b>添加服务器三步向导</b>：生成对端只读 socket 代理的 compose → 生成隧道账号与公钥 → 生成 <code>wud.yaml</code> 片段。删除也有对应引导。</p>
+      </div>
+      <div class="card reveal">
+        <h3><span class="ico i-amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 4.4 3.4 8.3 8 9 4.6-.7 8-4.6 8-9V6l-8-3Z"/><path d="M9.5 12l1.8 1.8L15 10"/></svg></span>④ 阿里云 ACR 匿名鉴权</h3>
+        <p>上游的 Alibaba provider 只在<b>配了凭据</b>时才发 <code>Basic</code>，否则不带任何认证头、不走 Bearer 匿名流程 —— 而阿里云要求 Bearer，于是<b>公开仓库也永远 401</b>，检测不了更新。本分支自己实现 Bearer 握手：探测 <code>/v2/</code> 取 realm → 换 token → 带 token 重放，兼容两种响应键；有凭据时仍转发 Basic 以支持私有仓库。</p>
+      </div>
+      <div class="card reveal">
+        <h3><span class="ico i-rose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></span>⑤ 通知与更新闭环</h3>
+        <p>更新成功后自动回一封<b>成功/失败邮件</b>，含旧/新镜像 digest 与目标版本。并修掉了两个真实痛点：邮件正文里 digest 类更新会显示 <code>(undefined)</code> 的模板缺陷；以及"更新→重建→又更新"的自激循环（按容器名加冷却护栏 + 双判据成功检测）。</p>
+      </div>
+    </div>
+
+    <div class="note ok reveal">
+      <b>兼容承诺：</b>升级只需换镜像名，回退也只需换回来。环境变量、触发器、卷映射、REST API 行为与上游完全一致；
+      后端新增部分（监控清单、镜像源列表）是<b>纯增量</b>的新表 + 新接口，不影响上游原有语义。
+    </div>
+  </div>
+</section>
+
+<!-- ================= 改动规模 ================= -->
+<section id="diff">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Diff at a glance</div>
+      <h2>改动规模与文件清单</h2>
+      <p class="lead">相对上游基线 <code>9.2.0</code> 的纯 fork 差异（<code>git diff --stat 227ce2a2 i18n-zh</code>，<code>227ce2a2</code> 即合入的 v9.2.0 提交）。</p>
+      <div class="stats" style="margin-top:24px">
+        <div class="stat c-blue"><div class="n" data-count="62">0</div><div class="l">个文件变更</div></div>
+        <div class="stat c-teal"><div class="n" data-count="6515" data-prefix="+">0</div><div class="l">行新增</div></div>
+        <div class="stat c-amber"><div class="n" data-count="361" data-prefix="−">0</div><div class="l">行删除</div></div>
+        <div class="stat c-violet"><div class="n" data-count="10">0</div><div class="l">个新增文件</div></div>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:24px">
+      <div class="reveal">
+        <h3 style="font-size:16.5px;margin:0 0 4px">新增文件</h3>
+        <table>
+          <thead><tr><th>文件</th><th>作用</th></tr></thead>
+          <tbody>
+            <tr><td class="k">ui/src/i18n/index.ts</td><td>i18n 入口：默认语言、读写 <code>wud-lang</code>、同步 <code>&lt;html lang&gt;</code></td></tr>
+            <tr><td class="k">ui/src/i18n/zh-CN.ts</td><td>简体中文消息包</td></tr>
+            <tr><td class="k">ui/src/i18n/en.ts</td><td>英文消息包（与中文键位对称）</td></tr>
+            <tr><td class="k">ui/src/views/WatchlistView.vue</td><td>监控清单页面（勾选 + 来源标识 + 待生效提示）</td></tr>
+            <tr><td class="k">ui/src/components/HubMirrorsEditor.vue</td><td>镜像源列表编辑器</td></tr>
+            <tr><td class="k">app/store/watchPreference.ts</td><td>监控偏好读写层（三态语义 + fail-safe）</td></tr>
+            <tr><td class="k">app/store/watchPreference.test.ts</td><td>上述 store 的单元测试（11 用例）</td></tr>
+            <tr><td class="k">app/store/hubMirror.ts</td><td>镜像源列表的存储与探测</td></tr>
+            <tr><td class="k">ui/src/services/mock/data/discovered.ts</td><td>监控清单演示数据（复刻三态语义）</td></tr>
+            <tr><td class="k">.github/workflows/docker-image.yml</td><td>push <code>i18n-zh</code> 自动构建推送 GHCR</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="reveal">
+        <h3 style="font-size:16.5px;margin:0 0 4px">后端改动（仅 14 个文件）</h3>
+        <table>
+          <thead><tr><th>文件</th><th>改动</th></tr></thead>
+          <tbody>
+            <tr><td class="k">app/api/container.ts</td><td>新增 <code>discover</code> 与 <code>watch-preference</code> 两个接口</td></tr>
+            <tr><td class="k">app/api/registry.ts</td><td>镜像源列表的读取 / 保存 / 连通性探测</td></tr>
+            <tr><td class="k">app/watchers/…/docker/Docker.ts</td><td>监控判定改为三优先级；新增 <code>discoverContainers()</code></td></tr>
+            <tr><td class="k">app/registries/…/hub/Hub.ts</td><td>Hub 的 <code>url</code>/<code>authurl</code>/<code>service</code> 可经环境变量覆盖</td></tr>
+            <tr><td class="k">app/registries/…/alibaba/Alibaba.ts</td><td>实现匿名 Bearer 鉴权握手</td></tr>
+            <tr><td class="k">app/store/db/migrations.ts</td><td>新增 <code>watched_containers</code> 表（迁移 id=5）</td></tr>
+            <tr><td class="k">app/store/db/schema.ts</td><td>对应 schema</td></tr>
+            <tr><td class="k">app/store/watchPreference.ts</td><td>监控偏好读写层（三态语义 + fail-safe）</td></tr>
+            <tr><td class="k">app/store/hubMirror.ts</td><td>镜像源列表的存储与探测</td></tr>
+            <tr><td class="k">配套 .test.ts</td><td>上述 store / registry / watcher 的单测</td></tr>
+          </tbody>
+        </table>
+        <p class="muted" style="font-size:14px;margin-top:12px">其余改动全在 <code>ui/</code>（汉化 + 语言切换 + 新页面）。</p>
+      </div>
+    </div>
+
+    <div class="reveal" style="margin-top:24px">
+      <h3 style="font-size:16.5px;margin:0 0 4px">上游持续跟进</h3>
+      <p class="lead" style="margin-top:6px">分支每次合并上游后都要<b>手工补键</b>：上游新增的界面文案不会自动出现在语言包里（上游没有 i18n 框架），所以每次同步都要把新串补进两份消息包。合并冲突集中在被翻译过的 <code>.vue</code> 文件；<code>ui/src/i18n/*</code> 基本不冲突。</p>
+      <table>
+        <thead><tr><th>已同步的上游版本</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="k">9.1.0</td><td>合并提交，零 i18n 补键（上游未动 UI）</td></tr>
+          <tr><td class="k">9.2.0</td><td>当前基线，已并入 <code>i18n-zh</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 快速开始 ================= -->
+<section id="start" class="alt">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Get started</div>
+      <h2>三行命令，把 WUD 换成中文</h2>
+      <p class="lead">镜像公开托管在 GHCR，无需登录即可拉取。</p>
+    </div>
+
+    <div class="grid2" style="margin-top:24px">
+      <div class="reveal">
+        <h3 style="font-size:16.5px;margin:0">docker run</h3>
+        <div class="code">
+          <div class="bar"><span class="t">bash</span><button class="cp" type="button">复制</button></div>
+<pre><code>docker run -d \
+  --name wud \
+  -p 3000:3000 \
+  -e WUD_AUTH_ADMIN_USER="admin" \
+  -e WUD_AUTH_ADMIN_PASSWORD="MySecurePassword123" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ghcr.io/dc1024/wud_zh:latest</code></pre>
+        </div>
+      </div>
+
+      <div class="reveal">
+        <h3 style="font-size:16.5px;margin:0">Docker Compose（只改一行）</h3>
+        <div class="code">
+          <div class="bar"><span class="t">diff</span><button class="cp" type="button">复制</button></div>
+<pre><code> services:
+   wud:
+<span class="del">-    image: getwud/wud:latest</span>
+<span class="add">+    image: ghcr.io/dc1024/wud_zh:latest</span></code></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="reveal" style="margin-top:26px">
+      <h3 style="font-size:16.5px;margin:0 0 4px">国内出口推荐配置（绕过 Docker Hub 封锁）</h3>
+      <div class="code">
+        <div class="bar"><span class="t">yaml</span><button class="cp" type="button">复制</button></div>
+<pre><code><span class="k">services:</span>
+  <span class="k">wud:</span>
+    <span class="k">image:</span> ghcr.io/dc1024/wud_zh:latest
+    <span class="k">container_name:</span> wud
+    <span class="k">ports:</span>
+      - <span class="s">"3000:3000"</span>
+    <span class="k">environment:</span>
+      - WUD_AUTH_ADMIN_USER=admin
+      - WUD_AUTH_ADMIN_PASSWORD=MySecurePassword123
+      <span class="c"># --- Docker Hub 镜像：绕过出口封锁（匿名镜像站，无需 authurl）---</span>
+      - WUD_REGISTRY_HUB_URL=https://docker.1panel.live
+    <span class="k">volumes:</span>
+      - /var/run/docker.sock:/var/run/docker.sock
+    <span class="k">restart:</span> unless-stopped</code></pre>
+      </div>
+      <p class="muted" style="font-size:14px;margin-top:12px">镜像站可换任意信任的公共 / 私有 OCI 代理，只要它完整实现 <code>manifest</code> 与 <code>tags/list</code>。（选 1panel 而非 daocloud，是因为后者禁用了 <code>tags/list</code>，会破坏 semver 版本发现。）</p>
+    </div>
+
+    <div class="reveal" style="margin-top:26px">
+      <h3 style="font-size:16.5px;margin:0 0 4px">发布与补翻</h3>
+      <div class="steps">
+        <div class="step"><span class="num"></span><div class="tx">
+          <h4>镜像自动构建</h4>
+          <p>push 到 <code>i18n-zh</code> 后由 GitHub Actions 自动构建（约 1~3 分钟）并推送 GHCR，标签为 <code>latest</code> 与 <code>sha-&lt;commit&gt;</code>；也可在 Actions 页手动 Run workflow。</p>
+        </div></div>
+        <div class="step"><span class="num"></span><div class="tx">
+          <h4>版本号规则</h4>
+          <p>构建时把 <code>WUD_VERSION</code> 固定写入，界面显示为 <code>wud_zh-beta1.4</code>。规则：无新功能则维持，有实质更新则最后一位 +0.1（1.0 → 1.1 → 1.2 → 1.3 → 1.4）。</p>
+        </div></div>
+        <div class="step"><span class="num"></span><div class="tx">
+          <h4>想补翻译？</h4>
+          <p>在 <code>zh-CN.ts</code> 和 <code>en.ts</code> 里<b>同时</b>加键（两份必须键位对称）→ 把 <code>.vue</code> 里的硬编码文案换成 <code>$t('命名空间.键')</code> → 提交推送，CI 自动重建镜像。<b>约定：<code>en.ts</code> 的值必须与上游原文逐字一致；中文按语义自然表达，不逐字直译。</b></p>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <h5>仓库</h5>
+        <p style="margin:0">
+          <a href="https://github.com/DC1024/wud_zh" target="_blank" rel="noopener">DC1024/wud_zh</a><br>
+          分支 <code>i18n-zh</code><br>
+          镜像 <code>ghcr.io/dc1024/wud_zh:latest</code>
+        </p>
+      </div>
+      <div>
+        <h5>上游与许可</h5>
+        <p style="margin:0">
+          基于 <a href="https://github.com/getwud/wud" target="_blank" rel="noopener">getwud/wud</a>（MIT）<br>
+          本分支改动同样以 <b>MIT</b> 发布<br>
+          上游版权归其作者所有
+        </p>
+      </div>
+      <div>
+        <h5>兼容性</h5>
+        <p style="margin:0">
+          环境变量 / 触发器 / 卷映射 / REST API<br>
+          与上游完全一致；后端改动为纯增量<br>
+          升级与回退都只需换镜像名
+        </p>
+      </div>
+    </div>
+    <p style="margin:28px 0 0; font-size:13px">
+      WUD 是 "What's Up Docker?" 的缩写 —— 一个轻量、主动的容器更新监控与自动化工具：持续扫描容器环境、跨公共与私有仓库检测镜像更新、做语义化版本分析，并通过你偏好的渠道通知，或直接触发自动更新。
+    </p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var rm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---- 数字滚动 ---- */
+  function animate(el){
+    var target = parseInt(el.getAttribute('data-count'), 10);
+    var prefix = el.getAttribute('data-prefix') || '';
+    var small  = el.querySelector('small');
+    var smallHTML = small ? small.outerHTML : '';
+    if (rm){ el.innerHTML = prefix + target.toLocaleString('en-US') + smallHTML; return; }
+    var dur = 900, t0 = null;
+    function frame(ts){
+      if (!t0) t0 = ts;
+      var p = Math.min(1, (ts - t0) / dur);
+      var e = 1 - Math.pow(1 - p, 3);
+      el.innerHTML = prefix + Math.round(target * e).toLocaleString('en-US') + smallHTML;
+      if (p < 1) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+  var seen = new WeakSet();
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      if (!en.isIntersecting) return;
+      var el = en.target;
+      if (!seen.has(el)){
+        seen.add(el);
+        el.classList.add('in');
+        if (el.hasAttribute('data-count')) animate(el);
+      }
+      io.unobserve(el);
+    });
+  }, {threshold: 0.25});
+  document.querySelectorAll('.reveal, [data-count]').forEach(function(el){ io.observe(el); });
+
+  /* ---- 语言切换预览 ---- */
+  var bz = document.getElementById('segZh'), be = document.getElementById('segEn');
+  function setLang(lang){
+    document.querySelectorAll('[data-zh][data-en]').forEach(function(el){
+      el.textContent = el.getAttribute(lang === 'en' ? 'data-en' : 'data-zh');
+    });
+    if (bz) bz.classList.toggle('on', lang !== 'en');
+    if (be) be.classList.toggle('on', lang === 'en');
+  }
+  if (bz) bz.addEventListener('click', function(){ setLang('zh'); });
+  if (be) be.addEventListener('click', function(){ setLang('en'); });
+
+  /* ---- 复制按钮 ---- */
+  document.querySelectorAll('.code .cp').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var pre = btn.closest('.code').querySelector('pre');
+      var text = pre ? pre.innerText : '';
+      function done(){ var o = btn.textContent; btn.textContent = '已复制'; setTimeout(function(){ btn.textContent = o; }, 1400); }
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(done).catch(function(){ fallback(text, done); });
+      } else { fallback(text, done); }
+    });
+  });
+  function fallback(text, cb){
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); cb(); } catch(e){}
+    document.body.removeChild(ta);
+  }
+})();
+</script>
+</body>
+</html>
