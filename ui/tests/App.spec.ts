@@ -38,6 +38,11 @@ jest.mock('vuetify', () => ({
       name: { value: 'light' },
     },
   }),
+  // Fork-specific: App.vue also syncs Vuetify's own component strings with the
+  // app language via useLocale(), so the mock must expose it as well.
+  useLocale: () => ({
+    current: { value: 'en' },
+  }),
 }));
 
 describe('App.vue', () => {
