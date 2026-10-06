@@ -73,10 +73,43 @@ class Custom extends DockerRegistryV2 {
                 this.configuration.token,
             );
         }
-        return this.authenticateBasic(
-            requestOptions,
-            this.getAuthCredentials(),
+
+        const credentials = this.getAuthCredentials();
+
+        // 1. Return cached bearer token if available
+        const cachedToken = this.getCachedBearerToken(
+            image,
+            this.configuration.url,
+            credentials,
         );
+        if (cachedToken) {
+            return this.authenticateBearer(requestOptions, cachedToken);
+        }
+
+        // 2. Probe registry for WWW-Authenticate challenge
+        const challenge = await this.getBearerChallenge(this.configuration.url);
+
+        if (challenge?.realm) {
+            // Registry challenged with Bearer auth; perform bearer token exchange
+            const token = await this.getBearerToken(
+                image,
+                this.configuration.url,
+                credentials,
+                challenge,
+            );
+            if (token) {
+                return this.authenticateBearer(requestOptions, token);
+            }
+            // Challenge was Bearer but exchange failed (e.g. 401 from realm)
+            return requestOptions;
+        }
+
+        // 3. Registry does not challenge or challenged with non-Bearer (e.g. Basic)
+        if (credentials) {
+            return this.authenticateBasic(requestOptions, credentials);
+        }
+
+        return requestOptions;
     }
 }
 

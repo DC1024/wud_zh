@@ -444,7 +444,10 @@
               />
             </v-window-item>
             <v-window-item value="triggers">
-              <container-triggers :container="selectedContainer" />
+              <container-triggers
+                :key="selectedContainer.id"
+                :container="selectedContainer"
+              />
             </v-window-item>
             <v-window-item value="image">
               <container-image :image="selectedContainer.image" />

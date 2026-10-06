@@ -12,6 +12,7 @@ import {
     transform as transformTag,
     extractTagComponents,
     isPrerelease,
+    interpolateTagFilter,
 } from '../../../tag';
 import * as event from '../../../event';
 import {
@@ -39,6 +40,11 @@ import {
     Container,
 } from '../../../model/container';
 import * as registry from '../../../registry';
+import {
+    findRegistryProvider,
+    resolveRegistry,
+    isRegistryRegistered,
+} from '../../../registries/registryProvider';
 import { isOneshot } from '../../../runtime/mode';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
@@ -88,6 +94,44 @@ export function extractDigestFromImage(imageSpec?: string): string | undefined {
         return imageSpec.substring(atIndex + 1);
     }
     return undefined;
+}
+
+/**
+ * Determine if the image of a Swarm service differs from the image of
+ * its store entry (e.g. after the service has been updated).
+ * The container id is stable across service updates, so a stale store entry
+ * must be detected by comparing:
+ *   - the image id (fullImageSpec, which includes pinned digest if present)
+ *   - the tag (a new tag can share the digest of the old one, e.g. 16 -> 16.4)
+ *   - the pinned digest (if present in the image spec)
+ */
+export function isServiceImageChanged(
+    containerInStore: Container,
+    fullImageSpec: string,
+    tagName?: string,
+): boolean {
+    const currentTag =
+        tagName ?? (parse(fullImageSpec.split('@')[0])?.tag || 'latest');
+    const pinnedDigest = extractDigestFromImage(fullImageSpec);
+    return (
+        containerInStore.image?.id !== fullImageSpec ||
+        containerInStore.image?.tag?.value !== currentTag ||
+        (pinnedDigest !== undefined &&
+            containerInStore.image?.digest?.repo !== pinnedDigest &&
+            containerInStore.image?.digest?.value !== pinnedDigest)
+    );
+}
+
+function getRegistries() {
+    return registry.getState().registry;
+}
+
+function getRegistry(registryName: string) {
+    return resolveRegistry(registryName, getRegistries());
+}
+
+function hasRegistry(registryName?: string) {
+    return isRegistryRegistered(registryName, getRegistries());
 }
 
 export class Swarm extends Watcher {
@@ -315,16 +359,91 @@ export class Swarm extends Watcher {
             const containerInStore = isOneshot()
                 ? undefined
                 : storeContainer.getContainer(containerId);
+            const imageChanged =
+                containerInStore !== undefined &&
+                isServiceImageChanged(containerInStore, fullImageSpec, tagName);
+            if (
+                imageChanged &&
+                this.log &&
+                typeof this.log.info === 'function'
+            ) {
+                this.log.info(
+                    `Container ${containerId} image changed, re-evaluating container`,
+                );
+            }
             if (
                 containerInStore !== undefined &&
-                containerInStore.error === undefined
+                containerInStore.error === undefined &&
+                !imageChanged
             ) {
-                if (containerInStore.watcher !== this.name) {
-                    containerInStore.watcher = this.name;
-                    storeContainer.updateContainer(containerInStore);
+                const storeRegistryName =
+                    containerInStore.image?.registry?.name;
+                if (storeRegistryName && !hasRegistry(storeRegistryName)) {
+                    if (this.log && typeof this.log.info === 'function') {
+                        this.log.info(
+                            `Container ${containerId} registry (${storeRegistryName}) is no longer registered, re-evaluating container`,
+                        );
+                    }
+                } else {
+                    let isUpdated = false;
+                    if (containerInStore.watcher !== this.name) {
+                        containerInStore.watcher = this.name;
+                        isUpdated = true;
+                    }
+                    if (storeRegistryName) {
+                        const resolvedRegistry = getRegistry(storeRegistryName);
+                        if (
+                            resolvedRegistry?.getId &&
+                            typeof resolvedRegistry.getId === 'function' &&
+                            containerInStore.image.registry.name !==
+                                resolvedRegistry.getId()
+                        ) {
+                            containerInStore.image.registry.name =
+                                resolvedRegistry.getId();
+                            isUpdated = true;
+                        }
+                    }
+                    const watchDigestLabel = getLabelValue(
+                        mergedLabels,
+                        KEY_WATCH_DIGEST,
+                    );
+                    let watchDigest = false;
+                    if (
+                        watchDigestLabel !== undefined &&
+                        watchDigestLabel !== ''
+                    ) {
+                        watchDigest = watchDigestLabel.toLowerCase() === 'true';
+                    } else if (!containerInStore.image?.tag?.semver) {
+                        const registryProvider = findRegistryProvider(
+                            containerInStore.image?.registry?.url,
+                            getRegistries(),
+                        );
+                        if (registryProvider) {
+                            watchDigest = registryProvider.shouldWatchDigest(
+                                undefined,
+                                containerInStore.image?.name,
+                                this.configuration.watchdigestdefault,
+                            );
+                        } else if (
+                            this.configuration.watchdigestdefault !== undefined
+                        ) {
+                            watchDigest = this.configuration.watchdigestdefault;
+                        }
+                    }
+                    if (
+                        containerInStore.image?.digest &&
+                        containerInStore.image.digest.watch !== watchDigest
+                    ) {
+                        containerInStore.image.digest.watch = watchDigest;
+                        isUpdated = true;
+                    }
+
+                    if (isUpdated) {
+                        storeContainer.updateContainer(containerInStore);
+                    }
+                    currentContainers.push(containerInStore);
+                    continue;
                 }
-                currentContainers.push(containerInStore);
-                continue;
             }
 
             const includeTags = getLabelValue(mergedLabels, KEY_TAG_INCLUDE);
@@ -359,11 +478,23 @@ export class Swarm extends Watcher {
             let watchDigest = false;
             if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
                 watchDigest = watchDigestLabel.toLowerCase() === 'true';
-            } else if (
-                !isSemver &&
-                this.configuration.watchdigestdefault !== undefined
-            ) {
-                watchDigest = this.configuration.watchdigestdefault;
+            } else if (!isSemver) {
+                const domain = parsedImage.domain || 'registry-1.docker.io';
+                const registryProvider = findRegistryProvider(
+                    domain,
+                    getRegistries(),
+                );
+                if (registryProvider) {
+                    watchDigest = registryProvider.shouldWatchDigest(
+                        undefined,
+                        parsedImage.path,
+                        this.configuration.watchdigestdefault,
+                    );
+                } else if (
+                    this.configuration.watchdigestdefault !== undefined
+                ) {
+                    watchDigest = this.configuration.watchdigestdefault;
+                }
             }
 
             const rawContainer: any = {
@@ -445,15 +576,15 @@ export class Swarm extends Watcher {
         container: Container,
         logContainer: any = this.log.child({ container: fullName(container) }),
     ): Promise<any> {
-        const registryProvider =
-            registry.getState().registry[container.image.registry.name];
-        const result: any = { tag: container.image.tag.value };
-
-        if (!registryProvider) {
+        let registryProvider;
+        try {
+            registryProvider = getRegistry(container.image.registry.name);
+        } catch {
             throw new Error(
                 `Unsupported registry (${container.image.registry.name})`,
             );
         }
+        const result: any = { tag: container.image.tag.value };
 
         const watchDigestLabel = getLabelValue(
             container.labels,
@@ -462,14 +593,17 @@ export class Swarm extends Watcher {
         let watchDigest = false;
         if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
             watchDigest = watchDigestLabel.toLowerCase() === 'true';
-        } else if (container.image.digest?.watch !== undefined) {
-            watchDigest = container.image.digest.watch;
         } else if (!container.image.tag.semver) {
             watchDigest = registryProvider.shouldWatchDigest(
                 undefined,
                 container.image.name,
                 this.configuration.watchdigestdefault,
             );
+        }
+        if (container.image.digest) {
+            container.image.digest.watch = watchDigest;
+        } else {
+            container.image.digest = { watch: watchDigest };
         }
 
         if (!container.image.tag.semver && !watchDigest) {
@@ -636,14 +770,22 @@ export class Swarm extends Watcher {
         let filteredTags = tags;
 
         if (container.includeTags) {
-            const includeTagsRegex = new RegExp(container.includeTags);
+            const includePattern = interpolateTagFilter(
+                container.includeTags,
+                container,
+            );
+            const includeTagsRegex = new RegExp(includePattern);
             filteredTags = filteredTags.filter((tag) =>
                 includeTagsRegex.test(tag),
             );
         }
 
         if (container.excludeTags) {
-            const excludeTagsRegex = new RegExp(container.excludeTags);
+            const excludePattern = interpolateTagFilter(
+                container.excludeTags,
+                container,
+            );
+            const excludeTagsRegex = new RegExp(excludePattern);
             filteredTags = filteredTags.filter(
                 (tag) => !excludeTagsRegex.test(tag),
             );
@@ -760,9 +902,10 @@ export class Swarm extends Watcher {
 
     private normalizeContainer(container: Container): Container {
         const containerWithNormalizedImage = container;
-        const registryProvider = Object.values(
-            registry.getState().registry,
-        ).find((provider) => provider.match(container.image.registry.url));
+        const registryProvider = findRegistryProvider(
+            container.image.registry.url,
+            getRegistries(),
+        );
         if (!registryProvider) {
             this.log.warn(
                 `${fullName(container)} - No Registry Provider found`,

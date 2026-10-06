@@ -12,6 +12,7 @@ import {
     transform as transformTag,
     extractTagComponents,
     isPrerelease,
+    interpolateTagFilter,
 } from '../../../tag';
 import * as event from '../../../event';
 import {
@@ -39,6 +40,11 @@ import {
     Container,
 } from '../../../model/container';
 import * as registry from '../../../registry';
+import {
+    findRegistryProvider,
+    resolveRegistry,
+    isRegistryRegistered,
+} from '../../../registries/registryProvider';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
 import { ComponentConfiguration } from '../../../registry/Component';
@@ -61,6 +67,7 @@ export interface DockerWatcherConfiguration extends ComponentConfiguration {
     watchatstart: boolean;
     delay?: string;
     exclude?: string;
+    include?: string;
 }
 
 /**
@@ -104,7 +111,11 @@ export function getTagCandidates(
 
     // Match include tag regex
     if (container.includeTags) {
-        const includeTagsRegex = new RegExp(container.includeTags);
+        const includePattern = interpolateTagFilter(
+            container.includeTags,
+            container,
+        );
+        const includeTagsRegex = new RegExp(includePattern);
         filteredTags = filteredTags.filter((tag) => includeTagsRegex.test(tag));
     } else {
         // If no includeTags, filter out tags starting with "sha"
@@ -113,7 +124,11 @@ export function getTagCandidates(
 
     // Match exclude tag regex
     if (container.excludeTags) {
-        const excludeTagsRegex = new RegExp(container.excludeTags);
+        const excludePattern = interpolateTagFilter(
+            container.excludeTags,
+            container,
+        );
+        const excludeTagsRegex = new RegExp(excludePattern);
         filteredTags = filteredTags.filter(
             (tag) => !excludeTagsRegex.test(tag),
         );
@@ -232,12 +247,15 @@ export function getTagCandidates(
 /**
  * Get the Docker Registry by name.
  */
-function getRegistry(registryName: string) {
-    const registryToReturn = getRegistries()[registryName];
-    if (!registryToReturn) {
-        throw new Error(`Unsupported Registry ${registryName}`);
-    }
-    return registryToReturn;
+export function getRegistry(registryName: string) {
+    return resolveRegistry(registryName, getRegistries());
+}
+
+/**
+ * Check if a registry is supported / registered.
+ */
+export function hasRegistry(registryName?: string) {
+    return isRegistryRegistered(registryName, getRegistries());
 }
 
 /**
@@ -307,20 +325,72 @@ function getRepoDigest(containerImage: any) {
     return digestSplit[1];
 }
 
+export const ROLLBACK_ARCHIVE_REGEX = /-wud-old-\d+$/;
+
+/**
+ * Return true if container is a rollback archive container.
+ */
+export function isRollbackArchive(name?: string): boolean {
+    return Boolean(name && ROLLBACK_ARCHIVE_REGEX.test(name));
+}
+
+/**
+ * Helper to match a filter pattern against container name or container labels.
+ * If filter starts with 'label:', pattern is tested against label key, key=value, and key:value.
+ * Otherwise, pattern is tested against container name.
+ */
+function matchFilter(
+    filter?: string,
+    containerName?: string,
+    containerLabels: Record<string, string> = {},
+    log?: Pick<Logger, 'warn'>,
+): boolean {
+    if (!filter) {
+        return false;
+    }
+    const isLabelFilter = filter.startsWith('label:');
+    const pattern = isLabelFilter ? filter.slice(6) : filter;
+    try {
+        const regex = new RegExp(pattern);
+        if (isLabelFilter) {
+            if (!containerLabels || typeof containerLabels !== 'object') {
+                return false;
+            }
+            return Object.entries(containerLabels).some(([key, value]) => {
+                return (
+                    regex.test(key) ||
+                    regex.test(`${key}=${value}`) ||
+                    regex.test(`${key}:${value}`)
+                );
+            });
+        }
+        return containerName ? regex.test(containerName) : false;
+    } catch (e: any) {
+        if (log && typeof log.warn === 'function') {
+            log.warn(`Invalid regex pattern '${pattern}': ${e.message}`);
+        }
+        return false;
+    }
+}
+
 /**
  * Return true if container must be watched.
  *
  * Priority order:
+ * Priority order:
+ *   0. a container whose name matches the rollback archive pattern (/-wud-old-\d+$/) is NEVER watched
  *   1. an explicit `wud.watch` label always wins (infrastructure as code)
  *   2. otherwise the preference recorded from the UI, when one is set
- *   3. otherwise, if an exclude regex is configured on the watcher and the
- *      container name matches it, the container is NOT watched (return false)
- *   4. otherwise the watcher default
+ *   3. otherwise, if an exclude filter is configured and the container matches it, NOT watched
+ *   4. otherwise, if an include filter is configured, watched only if it matches
+ *   5. otherwise the watcher default
  *
  * @param wudWatchLabelValue the value of the wud.watch label
  * @param watchByDefault true if containers must be watched by default
  * @param containerName the name of the container
- * @param excludeRegex optional regex pattern to exclude containers by name
+ * @param containerLabels the container labels
+ * @param excludeFilter optional pattern to exclude containers by name or label (prefixed with label:)
+ * @param includeFilter optional pattern to include containers by name or label (prefixed with label:)
  * @param log optional logger to log invalid regex warnings
  * @param preference the UI preference, undefined when none is set (kept as
  *   the last parameter to preserve upstream's positional signature)
@@ -329,32 +399,34 @@ export function isContainerToWatch(
     wudWatchLabelValue?: string,
     watchByDefault = true,
     containerName?: string,
-    excludeRegex?: string,
+    containerLabels: Record<string, string> = {},
+    excludeFilter?: string,
+    includeFilter?: string,
     log?: Pick<Logger, 'warn'>,
     preference?: boolean,
 ) {
+    if (containerName && ROLLBACK_ARCHIVE_REGEX.test(containerName)) {
+        return false;
+    }
     if (wudWatchLabelValue !== undefined && wudWatchLabelValue !== '') {
         return wudWatchLabelValue.toLowerCase() === 'true';
     }
     if (preference !== undefined) {
         return preference;
     }
-    if (excludeRegex && containerName) {
-        try {
-            const regex = new RegExp(excludeRegex);
-            if (regex.test(containerName)) {
-                return false;
-            }
-        } catch (e: any) {
-            if (log) {
-                log.warn(
-                    `Invalid exclude regex '${excludeRegex}': ${e.message}`,
-                );
-            }
-        }
+    if (
+        excludeFilter &&
+        matchFilter(excludeFilter, containerName, containerLabels, log)
+    ) {
+        return false;
+    }
+    if (includeFilter !== undefined && includeFilter !== '') {
+        return matchFilter(includeFilter, containerName, containerLabels, log);
     }
     return watchByDefault;
 }
+
+export const isContainerIncluded = isContainerToWatch;
 
 /**
  * Tell which input decided whether a container is watched.
@@ -402,6 +474,7 @@ export class Docker extends Watcher {
             watchatstart: this.joi.boolean().default(true),
             delay: this.joi.string().optional(),
             exclude: this.joi.string().optional(),
+            include: this.joi.string().optional(),
         });
     }
 
@@ -556,6 +629,14 @@ export class Docker extends Watcher {
         }
         const action = dockerEvent.Action;
         const containerId = dockerEvent.Actor?.ID || dockerEvent.id;
+        const eventName = dockerEvent.Actor?.Attributes?.name
+            ? dockerEvent.Actor.Attributes.name.replace(/\//, '')
+            : undefined;
+
+        // Rollback archive containers should never be processed or indexed
+        if (eventName && ROLLBACK_ARCHIVE_REGEX.test(eventName)) {
+            return;
+        }
 
         // If the container was created or destroyed => perform a watch
         if (action === 'destroy' || action === 'create') {
@@ -572,6 +653,10 @@ export class Docker extends Watcher {
                     (dockerEvent.Actor?.Attributes?.name
                         ? dockerEvent.Actor.Attributes.name.replace(/\//, '')
                         : undefined);
+
+                if (newName && ROLLBACK_ARCHIVE_REGEX.test(newName)) {
+                    return;
+                }
                 const containerFound = storeContainer.getContainer(containerId);
                 if (containerFound) {
                     // Child logger for the container to process
@@ -580,6 +665,7 @@ export class Docker extends Watcher {
                     });
                     const oldStatus = containerFound.status;
                     const oldName = containerFound.name;
+                    const oldDisplayName = containerFound.displayName;
                     let isUpdated = false;
 
                     if (newStatus && oldStatus !== newStatus) {
@@ -589,6 +675,16 @@ export class Docker extends Watcher {
                         );
                         isUpdated = true;
                     }
+
+                    const inspectLabels =
+                        containerInspect.Config?.Labels ||
+                        (containerInspect as any).Labels;
+                    const explicitDisplayName =
+                        inspectLabels?.[wudDisplayName] ||
+                        (inspectLabels === undefined
+                            ? containerFound.labels?.[wudDisplayName]
+                            : undefined);
+
                     if (newName && oldName !== newName) {
                         containerFound.name = newName;
                         logContainer.info(
@@ -596,6 +692,32 @@ export class Docker extends Watcher {
                         );
                         isUpdated = true;
                     }
+
+                    if (explicitDisplayName) {
+                        if (
+                            containerFound.displayName !== explicitDisplayName
+                        ) {
+                            containerFound.displayName = explicitDisplayName;
+                            isUpdated = true;
+                        }
+                    } else if (newName) {
+                        if (
+                            oldName !== newName ||
+                            oldDisplayName === oldName ||
+                            (oldDisplayName !== undefined &&
+                                oldDisplayName !== newName)
+                        ) {
+                            if (containerFound.displayName !== newName) {
+                                containerFound.displayName = newName;
+                                isUpdated = true;
+                            }
+                        }
+                    }
+
+                    if (inspectLabels) {
+                        containerFound.labels = inspectLabels;
+                    }
+
                     if (isUpdated) {
                         storeContainer.updateContainer(containerFound);
                     }
@@ -724,7 +846,9 @@ export class Docker extends Watcher {
                 container.Labels ? container.Labels[wudWatch] : undefined,
                 this.configuration.watchbydefault,
                 getContainerName(container),
+                container.Labels || {},
                 this.configuration.exclude,
+                this.configuration.include,
                 this.log,
                 watchPreferences.get(getContainerName(container)),
             ),
@@ -818,7 +942,9 @@ export class Docker extends Watcher {
                     labelValue,
                     this.configuration.watchbydefault,
                     name,
+                    containerLabels || {},
                     this.configuration.exclude,
+                    this.configuration.include,
                     this.log,
                     preference,
                 ),
@@ -844,14 +970,17 @@ export class Docker extends Watcher {
             let watchDigest = false;
             if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
                 watchDigest = watchDigestLabel.toLowerCase() === 'true';
-            } else if (container.image.digest?.watch !== undefined) {
-                watchDigest = container.image.digest.watch;
             } else if (!container.image.tag.semver) {
                 watchDigest = registryProvider.shouldWatchDigest(
                     undefined,
                     container.image.name,
                     this.configuration.watchdigestdefault,
                 );
+            }
+            if (container.image.digest) {
+                container.image.digest.watch = watchDigest;
+            } else {
+                container.image.digest = { watch: watchDigest };
             }
 
             if (!container.image.tag.semver && !watchDigest) {
@@ -1008,37 +1137,124 @@ export class Docker extends Watcher {
             containerInStore !== undefined &&
             containerInStore.error === undefined
         ) {
-            this.log.debug(`Container ${containerInStore.id} already in store`);
-            let isUpdated = false;
-            if (containerInStore.watcher !== this.name) {
-                containerInStore.watcher = this.name;
-                isUpdated = true;
-            }
-            if (stack && !containerInStore.stack) {
-                containerInStore.stack = stack;
-                isUpdated = true;
-            }
-            if (delay && containerInStore.delay !== delay) {
-                containerInStore.delay = delay;
-                isUpdated = true;
-            }
-            const currentContainerName = this.getContainerName(container);
-            if (
-                currentContainerName &&
-                containerInStore.name !== currentContainerName
-            ) {
+            const storeRegistryName = containerInStore.image?.registry?.name;
+            if (storeRegistryName && !hasRegistry(storeRegistryName)) {
                 if (this.log && typeof this.log.info === 'function') {
                     this.log.info(
-                        `Container ${containerInStore.id} renamed from ${containerInStore.name} to ${currentContainerName}`,
+                        `Container ${containerInStore.id} registry (${storeRegistryName}) is no longer registered, re-evaluating container`,
                     );
                 }
-                containerInStore.name = currentContainerName;
-                isUpdated = true;
+            } else {
+                this.log.debug(
+                    `Container ${containerInStore.id} already in store`,
+                );
+                let isUpdated = false;
+                if (containerInStore.watcher !== this.name) {
+                    containerInStore.watcher = this.name;
+                    isUpdated = true;
+                }
+                if (storeRegistryName) {
+                    const resolvedRegistry = getRegistry(storeRegistryName);
+                    if (
+                        resolvedRegistry?.getId &&
+                        typeof resolvedRegistry.getId === 'function' &&
+                        containerInStore.image.registry.name !==
+                            resolvedRegistry.getId()
+                    ) {
+                        containerInStore.image.registry.name =
+                            resolvedRegistry.getId();
+                        isUpdated = true;
+                    }
+                }
+                if (stack && !containerInStore.stack) {
+                    containerInStore.stack = stack;
+                    isUpdated = true;
+                }
+                if (delay && containerInStore.delay !== delay) {
+                    containerInStore.delay = delay;
+                    isUpdated = true;
+                }
+                const currentContainerName = this.getContainerName(container);
+                const oldName = containerInStore.name;
+                const oldDisplayName = containerInStore.displayName;
+                if (currentContainerName && oldName !== currentContainerName) {
+                    if (this.log && typeof this.log.info === 'function') {
+                        this.log.info(
+                            `Container ${containerInStore.id} renamed from ${oldName} to ${currentContainerName}`,
+                        );
+                    }
+                    containerInStore.name = currentContainerName;
+                    isUpdated = true;
+                }
+
+                const explicitDisplayName =
+                    displayName ||
+                    containerLabels[wudDisplayName] ||
+                    (container.Labels === undefined &&
+                    container.labels === undefined
+                        ? containerInStore.labels?.[wudDisplayName]
+                        : undefined);
+
+                if (explicitDisplayName) {
+                    if (containerInStore.displayName !== explicitDisplayName) {
+                        containerInStore.displayName = explicitDisplayName;
+                        isUpdated = true;
+                    }
+                } else if (currentContainerName) {
+                    if (
+                        oldName !== currentContainerName ||
+                        oldDisplayName === oldName ||
+                        (oldDisplayName !== undefined &&
+                            oldDisplayName !== currentContainerName)
+                    ) {
+                        if (
+                            containerInStore.displayName !==
+                            currentContainerName
+                        ) {
+                            containerInStore.displayName = currentContainerName;
+                            isUpdated = true;
+                        }
+                    }
+                }
+
+                if (container.Labels || container.labels) {
+                    containerInStore.labels = containerLabels;
+                }
+
+                const watchDigestLabel = containerLabels[wudWatchDigest];
+                let watchDigest = false;
+                if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
+                    watchDigest = watchDigestLabel.toLowerCase() === 'true';
+                } else if (!containerInStore.image?.tag?.semver) {
+                    const registryProvider = findRegistryProvider(
+                        containerInStore.image?.registry?.url,
+                        getRegistries(),
+                    );
+                    if (registryProvider) {
+                        watchDigest = registryProvider.shouldWatchDigest(
+                            undefined,
+                            containerInStore.image?.name,
+                            this.configuration.watchdigestdefault,
+                        );
+                    } else if (
+                        this.configuration.watchdigestdefault !== undefined
+                    ) {
+                        watchDigest = this.configuration.watchdigestdefault;
+                    }
+                }
+                if (
+                    containerInStore.image?.digest &&
+                    containerInStore.image.digest.watch !== watchDigest
+                ) {
+                    containerInStore.image.digest.watch = watchDigest;
+                    isUpdated = true;
+                }
+
+                if (isUpdated) {
+                    storeContainer.updateContainer(containerInStore);
+                }
+                return containerInStore;
             }
-            if (isUpdated) {
-                storeContainer.updateContainer(containerInStore);
-            }
-            return containerInStore;
         }
 
         // Get container image details
@@ -1086,8 +1302,9 @@ export class Docker extends Watcher {
             };
         }
 
-        const registryProvider = Object.values(getRegistries()).find(
-            (registry) => registry.match(parsedImage.domain),
+        const registryProvider = findRegistryProvider(
+            parsedImage.domain,
+            getRegistries(),
         );
 
         if (!registryProvider) {
@@ -1206,8 +1423,9 @@ export class Docker extends Watcher {
 
     private normalizeContainer(container: Container) {
         const containerWithNormalizedImage = container;
-        const registryProvider = Object.values(getRegistries()).find(
-            (provider) => provider.match(container.image.registry.url),
+        const registryProvider = findRegistryProvider(
+            container.image.registry.url,
+            getRegistries(),
         );
         if (!registryProvider) {
             this.log.warn(

@@ -6,6 +6,125 @@ import Docker from '../docker/Docker';
 import { getState } from '../../../registry';
 import { fullName } from '../../../model/container';
 import { HookManager } from '../../hooks/HookManager';
+import { performProjectTransaction } from './rollback';
+
+/**
+ * Find the compose service key corresponding to a container.
+ * Priority:
+ * 1. Docker compose service label ('com.docker.compose.service')
+ * 2. Service definition container_name matching container name
+ * 3. Service definition key matching container name
+ * 4. Fallback to any service whose image matches the container image (only if no label specified)
+ *
+ * @param compose
+ * @param container
+ * @param processedServices - Optional Set to skip already-processed services
+ * @returns {string|undefined}
+ */
+function findServiceKeyForContainer(
+    compose,
+    container,
+    processedServices = undefined,
+) {
+    if (!compose || !compose.services || typeof compose.services !== 'object') {
+        return undefined;
+    }
+
+    const registry = getState().registry[container.image?.registry?.name];
+    if (!registry) {
+        return undefined;
+    }
+
+    const currentImage = registry.getImageFullName(
+        container.image,
+        container.image?.tag?.value,
+    );
+
+    const serviceKeys = Object.keys(compose.services);
+    const containerName = container.name
+        ? container.name.replace(/^\//, '')
+        : '';
+
+    // 1. Check com.docker.compose.service label
+    const labelService =
+        container.labels && container.labels['com.docker.compose.service'];
+    if (labelService) {
+        if (compose.services[labelService]) {
+            const service = compose.services[labelService];
+            if (
+                Boolean(service.image) &&
+                service.image.includes(currentImage)
+            ) {
+                if (
+                    !processedServices ||
+                    !processedServices.has(labelService)
+                ) {
+                    return labelService;
+                }
+            }
+        }
+        return undefined;
+    }
+
+    // 2. Check service.container_name matching container name
+    if (containerName) {
+        for (const key of serviceKeys) {
+            const service = compose.services[key];
+            const serviceContainerName = service?.container_name
+                ? service.container_name.replace(/^\//, '')
+                : '';
+            if (
+                serviceContainerName &&
+                serviceContainerName === containerName
+            ) {
+                if (
+                    Boolean(service.image) &&
+                    service.image.includes(currentImage)
+                ) {
+                    if (!processedServices || !processedServices.has(key)) {
+                        return key;
+                    }
+                    return undefined;
+                }
+            }
+        }
+    }
+
+    // 3. Check service key matching container name
+    if (containerName) {
+        for (const key of serviceKeys) {
+            if (key === containerName) {
+                const service = compose.services[key];
+                if (
+                    Boolean(service.image) &&
+                    service.image.includes(currentImage)
+                ) {
+                    if (!processedServices || !processedServices.has(key)) {
+                        return key;
+                    }
+                    return undefined;
+                }
+            }
+        }
+    }
+
+    // 4. Fallback only if container has no compose service label
+    if (!labelService) {
+        for (const key of serviceKeys) {
+            const service = compose.services[key];
+            if (
+                Boolean(service.image) &&
+                service.image.includes(currentImage)
+            ) {
+                if (!processedServices || !processedServices.has(key)) {
+                    return key;
+                }
+            }
+        }
+    }
+
+    return undefined;
+}
 
 /**
  * Return true if the container belongs to the compose file.
@@ -14,18 +133,7 @@ import { HookManager } from '../../hooks/HookManager';
  * @returns true/false
  */
 function doesContainerBelongToCompose(compose, container) {
-    // Get registry configuration
-    const registry = getState().registry[container.image.registry.name];
-
-    // Rebuild image definition string
-    const currentImage = registry.getImageFullName(
-        container.image,
-        container.image.tag.value,
-    );
-    return Object.keys(compose.services).some((key) => {
-        const service = compose.services[key];
-        return Boolean(service.image) && service.image.includes(currentImage);
-    });
+    return Boolean(findServiceKeyForContainer(compose, container));
 }
 
 /**
@@ -284,6 +392,49 @@ class Dockercompose extends Docker {
             this.log.info(
                 `Do not replace existing docker-compose file ${composeFile} (dry-run mode enabled)`,
             );
+        } else if (
+            containersFiltered.some(
+                (container) => this.resolveRollback(container).enabled,
+            )
+        ) {
+            // Quality Gate Pre-update hooks for all containers in this compose stack
+            for (const container of containersFiltered) {
+                const watcher = this.getWatcher(container);
+                await HookManager.runPreHooks(
+                    container,
+                    this.configuration.hooks,
+                    {
+                        triggerName: this.name,
+                        dockerApi: watcher?.dockerApi,
+                        log: this.log,
+                    },
+                );
+            }
+
+            // CLI-free project transaction with whole-project revert.
+            const committed = await performProjectTransaction(
+                this,
+                composeFile,
+                containersFiltered,
+                currentVersionToUpdateVersionArray,
+            );
+
+            // Post-update hooks for all containers in this compose stack
+            if (committed) {
+                for (const container of containersFiltered) {
+                    const watcher = this.getWatcher(container);
+                    await HookManager.runPostHooks(
+                        container,
+                        this.configuration.hooks,
+                        {
+                            triggerName: this.name,
+                            dockerApi: watcher?.dockerApi,
+                            log: this.log,
+                        },
+                    );
+                }
+            }
+            return;
         } else {
             // Quality Gate Pre-update hooks for all containers in this compose stack
             for (const container of containersFiltered) {
@@ -306,19 +457,18 @@ class Dockercompose extends Docker {
             }
 
             // Read the compose file as a string
-            let composeFileStr = (
+            const composeFileStr = (
                 await this.getComposeFile(composeFile)
             ).toString();
 
-            // Replace all versions
-            currentVersionToUpdateVersionArray.forEach(
-                ({ current, update }) => {
-                    composeFileStr = composeFileStr.replaceAll(current, update);
-                },
+            // Replace all versions targeting specific services in YAML
+            const updatedComposeFileStr = this.updateComposeYaml(
+                composeFileStr,
+                currentVersionToUpdateVersionArray,
             );
 
             // Write docker-compose.yml file back
-            await this.writeComposeFile(composeFile, composeFileStr);
+            await this.writeComposeFile(composeFile, updatedComposeFileStr);
         }
 
         // Update all containers
@@ -347,6 +497,50 @@ class Dockercompose extends Docker {
     }
 
     /**
+     * Resolve the registry manager of a container.
+     * @param container the container
+     * @returns {Registry}
+     */
+    resolveRegistry(container) {
+        return getState().registry[container.image.registry.name];
+    }
+
+    /**
+     * Force a backup of the compose file (implicit rollback requirement).
+     * Throws when the backup cannot be written so the transaction can abort
+     * before mutating anything.
+     * @param composeFile the compose file path
+     * @returns {Promise<void>}
+     */
+    async ensureComposeBackup(composeFile) {
+        await fs.copyFile(composeFile, `${composeFile}.back`);
+    }
+
+    /**
+     * Restore the compose file from its `.back` copy.
+     * @param composeFile the compose file path
+     * @returns {Promise<void>}
+     */
+    async restoreComposeFileFromBackup(composeFile) {
+        await fs.copyFile(`${composeFile}.back`, composeFile);
+    }
+
+    /**
+     * Rewrite the compose file replacing the current versions with the update
+     * versions. Throws on failure (unlike writeComposeFile).
+     * @param composeFile the compose file path
+     * @param mappings [{ current, update }]
+     * @returns {Promise<void>}
+     */
+    async rewriteComposeFile(composeFile, mappings) {
+        let composeFileStr = (await fs.readFile(composeFile)).toString();
+        mappings.forEach(({ current, update }) => {
+            composeFileStr = composeFileStr.replaceAll(current, update);
+        });
+        await fs.writeFile(composeFile, composeFileStr);
+    }
+
+    /**
      * Backup a file.
      * @param file
      * @param backupFile
@@ -370,41 +564,38 @@ class Dockercompose extends Docker {
      * @param compose
      * @param container
      * @param processedServices - Set to track which services have already been processed
-     * @returns {{current, update}|undefined}
+     * @returns {{service, current, update}|undefined}
      */
     mapCurrentVersionToUpdateVersion(compose, container, processedServices) {
         // Get registry configuration
         this.log.debug(`Get ${container.image.registry.name} registry manager`);
         const registry = getState().registry[container.image.registry.name];
 
-        // Rebuild image definition string
-        const currentImage = registry.getImageFullName(
-            container.image,
-            container.image.tag.value,
-        );
-
-        const serviceKeyToUpdate = Object.keys(compose.services).find(
-            (serviceKey) => {
-                const service = compose.services[serviceKey];
-                return (
-                    Boolean(service.image) &&
-                    service.image.includes(currentImage)
-                );
-            },
+        const serviceKeyToUpdate = findServiceKeyForContainer(
+            compose,
+            container,
+            processedServices,
         );
 
         if (!serviceKeyToUpdate) {
-            this.log.warn(
-                `Could not find service for container ${container.name} with image ${currentImage}`,
-            );
-            return undefined;
-        }
-
-        // Skip if this service has already been processed (duplicate container with same image)
-        if (processedServices && processedServices.has(serviceKeyToUpdate)) {
-            this.log.debug(
-                `Service ${serviceKeyToUpdate} already processed for container ${container.name} (duplicate image)`,
-            );
+            const alreadyProcessed =
+                processedServices &&
+                findServiceKeyForContainer(compose, container);
+            if (alreadyProcessed && processedServices.has(alreadyProcessed)) {
+                this.log.debug(
+                    `Service ${alreadyProcessed} already processed for container ${container.name} (duplicate image)`,
+                );
+            } else {
+                const currentImage = registry?.getImageFullName
+                    ? registry.getImageFullName(
+                          container.image,
+                          container.image?.tag?.value,
+                      )
+                    : 'unknown';
+                this.log.warn(
+                    `Could not find service for container ${container.name} with image ${currentImage}`,
+                );
+            }
             return undefined;
         }
 
@@ -415,9 +606,69 @@ class Dockercompose extends Docker {
 
         // Rebuild image definition string
         return {
+            service: serviceKeyToUpdate,
             current: compose.services[serviceKeyToUpdate].image,
             update: this.getNewImageFullName(registry, container),
         };
+    }
+
+    /**
+     * Update compose file YAML string with target service image updates.
+     * Preserves comments, quotes, and document structure via AST.
+     * @param composeFileStr
+     * @param updates Array of { service, current, update }
+     * @returns {string}
+     */
+    updateComposeYaml(composeFileStr, updates) {
+        try {
+            const doc = yaml.parseDocument(composeFileStr, {
+                maxAliasCount: 10000,
+            });
+            if (doc.errors && doc.errors.length > 0) {
+                this.log.warn(
+                    `YAML parse errors in compose file (${doc.errors[0].message}), falling back to string replacement`,
+                );
+                return this.fallbackStringReplace(composeFileStr, updates);
+            }
+
+            let modified = false;
+            for (const { service, update } of updates) {
+                if (service && doc.hasIn(['services', service, 'image'])) {
+                    doc.setIn(['services', service, 'image'], update);
+                    modified = true;
+                } else if (service && doc.hasIn(['services', service])) {
+                    doc.setIn(['services', service, 'image'], update);
+                    modified = true;
+                }
+            }
+
+            if (modified) {
+                return doc.toString();
+            }
+
+            return this.fallbackStringReplace(composeFileStr, updates);
+        } catch (e) {
+            this.log.warn(
+                `Failed to update compose YAML via AST (${e.message}), falling back to string replacement`,
+            );
+            return this.fallbackStringReplace(composeFileStr, updates);
+        }
+    }
+
+    /**
+     * Fallback replacement of image strings.
+     * @param composeFileStr
+     * @param updates
+     * @returns {string}
+     */
+    fallbackStringReplace(composeFileStr, updates) {
+        let result = composeFileStr;
+        updates.forEach(({ current, update }) => {
+            if (current && update) {
+                result = result.replaceAll(current, update);
+            }
+        });
+        return result;
     }
 
     /**
@@ -473,4 +724,4 @@ class Dockercompose extends Docker {
 }
 
 export default Dockercompose;
-export { doesContainerBelongToCompose };
+export { doesContainerBelongToCompose, findServiceKeyForContainer };

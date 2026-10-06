@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import mqtt, { IClientOptions, MqttClient } from 'mqtt';
-import Trigger, { TriggerConfiguration } from '../Trigger';
+import Trigger, { RollbackReport, TriggerConfiguration } from '../Trigger';
 import Hass from './Hass';
 import {
     registerContainerAdded,
@@ -181,7 +181,13 @@ class Mqtt extends Trigger {
         });
 
         this.client.on('error', (error: mqtt.ErrorWithReasonCode) => {
-            this.log.debug(`MQTT client error ${error.code}`);
+            const message =
+                error?.code &&
+                error?.message &&
+                !error.message.includes(error.code.toString())
+                    ? `${error.message} (${error.code})`
+                    : error?.message || error?.code || error;
+            this.log.error(`MQTT client error (${message})`);
         });
 
         this.client.on('end', () => {
@@ -203,19 +209,31 @@ class Mqtt extends Trigger {
      * @param container the container
      */
     async trigger(container: Container) {
+        if (!this.client || !this.client.connected) {
+            throw new Error('MQTT client is not connected');
+        }
         const containerTopic = getContainerTopic({
             baseTopic: this.configuration.topic,
             container,
         });
 
         this.log.debug(`Publish container result to ${containerTopic}`);
-        this.client.publish(
-            containerTopic,
-            JSON.stringify(flatten(container)),
-            {
-                retain: true,
-            },
-        );
+        return new Promise<void>((resolve, reject) => {
+            this.client.publish(
+                containerTopic,
+                JSON.stringify(flatten(container)),
+                {
+                    retain: true,
+                },
+                (err) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve();
+                    }
+                },
+            );
+        });
     }
 
     /**
@@ -224,6 +242,23 @@ class Mqtt extends Trigger {
 
     async triggerBatch() {
         throw new Error('This trigger does not support "batch" mode');
+    }
+
+    /**
+     * This trigger supports rollback notifications.
+     */
+    supportsRollbackNotifications(): boolean {
+        return true;
+    }
+
+    /**
+     * Publish a rollback report on the `<topic>/rollback` MQTT topic.
+     * @param rollbackReport the rollback report
+     */
+    async triggerRollback(rollbackReport: RollbackReport) {
+        const rollbackTopic = `${this.configuration.topic}/rollback`;
+        this.log.debug(`Publish rollback report to ${rollbackTopic}`);
+        this.client.publish(rollbackTopic, JSON.stringify(rollbackReport));
     }
 
     /**

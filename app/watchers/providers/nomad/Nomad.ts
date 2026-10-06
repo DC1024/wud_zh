@@ -5,6 +5,7 @@ import JoiCronExpression from 'joi-cron-expression';
 const joi = JoiCronExpression(Joi);
 import cron from 'node-cron';
 import axios, { AxiosInstance } from 'axios';
+import { setupAxiosProxy } from '../../../http/proxy';
 import parse from 'parse-docker-image-name';
 import { Logger } from 'pino';
 import {
@@ -13,6 +14,7 @@ import {
     transform as transformTag,
     extractTagComponents,
     isPrerelease,
+    interpolateTagFilter,
 } from '../../../tag';
 import * as event from '../../../event';
 import {
@@ -47,6 +49,11 @@ import {
     Container,
 } from '../../../model/container';
 import * as registry from '../../../registry';
+import {
+    findRegistryProvider,
+    resolveRegistry,
+    isRegistryRegistered,
+} from '../../../registries/registryProvider';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
 import Component, { ComponentConfiguration } from '../../../registry/Component';
@@ -116,6 +123,14 @@ function getRegistries() {
     return registry.getState().registry;
 }
 
+function getRegistry(registryName: string) {
+    return resolveRegistry(registryName, getRegistries());
+}
+
+function hasRegistry(registryName?: string) {
+    return isRegistryRegistered(registryName, getRegistries());
+}
+
 /**
  * Determine if a task should be watched based on the meta value and watchByDefault.
  */
@@ -154,6 +169,32 @@ export function extractDigestFromImage(image: string): string | undefined {
     const digestPart = image.substring(atIndex + 1);
     if (digestPart.startsWith('sha256:')) return digestPart;
     return undefined;
+}
+
+/**
+ * Determine if the image of a Nomad task differs from the image of
+ * its store entry (e.g. after the task image has been updated).
+ * The container id is stable across task updates, so a stale store entry
+ * must be detected by comparing:
+ *   - the image id (imageName, which includes pinned digest if present)
+ *   - the tag (a new tag can share the digest of the old one, e.g. 16 -> 16.4)
+ *   - the pinned digest (if present in the image spec)
+ */
+export function isTaskImageChanged(
+    containerInStore: Container,
+    imageName: string,
+    tagName?: string,
+): boolean {
+    const currentTag =
+        tagName ?? (parse(imageName.split('@')[0])?.tag || 'latest');
+    const pinnedDigest = extractDigestFromImage(imageName);
+    return (
+        containerInStore.image?.id !== imageName ||
+        containerInStore.image?.tag?.value !== currentTag ||
+        (pinnedDigest !== undefined &&
+            containerInStore.image?.digest?.repo !== pinnedDigest &&
+            containerInStore.image?.digest?.value !== pinnedDigest)
+    );
 }
 
 /**
@@ -321,6 +362,7 @@ export class Nomad extends Watcher {
             httpsAgent,
             timeout: 10000,
         });
+        setupAxiosProxy(this.apiClient);
     }
 
     async deregisterComponent() {
@@ -593,24 +635,96 @@ export class Nomad extends Watcher {
         );
 
         const containerInStore = storeContainer.getContainer(containerId);
+        const imageChanged =
+            containerInStore !== undefined &&
+            isTaskImageChanged(containerInStore, imageName);
+        if (imageChanged && this.log && typeof this.log.info === 'function') {
+            this.log.info(
+                `Container ${containerId} image changed, re-evaluating container`,
+            );
+        }
         if (
             containerInStore !== undefined &&
-            containerInStore.error === undefined
+            containerInStore.error === undefined &&
+            !imageChanged
         ) {
-            this.log.debug(`Container ${containerId} already in store`);
-            if (containerInStore.watcher !== this.name) {
-                containerInStore.watcher = this.name;
-                storeContainer.updateContainer(containerInStore);
+            const storeRegistryName = containerInStore.image?.registry?.name;
+            if (storeRegistryName && !hasRegistry(storeRegistryName)) {
+                if (this.log && typeof this.log.info === 'function') {
+                    this.log.info(
+                        `Container ${containerId} registry (${storeRegistryName}) is no longer registered, re-evaluating container`,
+                    );
+                }
+            } else {
+                this.log.debug(`Container ${containerId} already in store`);
+                let isUpdated = false;
+                if (containerInStore.watcher !== this.name) {
+                    containerInStore.watcher = this.name;
+                    isUpdated = true;
+                }
+                if (storeRegistryName) {
+                    const resolvedRegistry = getRegistry(storeRegistryName);
+                    if (
+                        resolvedRegistry?.getId &&
+                        typeof resolvedRegistry.getId === 'function' &&
+                        containerInStore.image.registry.name !==
+                            resolvedRegistry.getId()
+                    ) {
+                        containerInStore.image.registry.name =
+                            resolvedRegistry.getId();
+                        isUpdated = true;
+                    }
+                }
+                const watchDigestMeta = getMeta(
+                    wudWatchDigest,
+                    wudWatchDigestCanonical,
+                );
+                let watchDigest = false;
+                if (watchDigestMeta !== undefined && watchDigestMeta !== '') {
+                    watchDigest = watchDigestMeta.toLowerCase() === 'true';
+                } else if (!containerInStore.image?.tag?.semver) {
+                    const registryProvider = findRegistryProvider(
+                        containerInStore.image?.registry?.url,
+                        getRegistries(),
+                    );
+                    if (registryProvider) {
+                        watchDigest = registryProvider.shouldWatchDigest(
+                            undefined,
+                            containerInStore.image?.name,
+                            this.configuration.watchdigestdefault,
+                        );
+                    } else if (
+                        this.configuration.watchdigestdefault !== undefined
+                    ) {
+                        watchDigest = this.configuration.watchdigestdefault;
+                    }
+                }
+                if (
+                    containerInStore.image?.digest &&
+                    containerInStore.image.digest.watch !== watchDigest
+                ) {
+                    containerInStore.image.digest.watch = watchDigest;
+                    isUpdated = true;
+                }
+
+                if (isUpdated) {
+                    storeContainer.updateContainer(containerInStore);
+                }
+                return containerInStore;
             }
-            return containerInStore;
         }
 
-        let parsedImage = parse(imageName);
+        const imageWithoutDigest = imageName.split('@')[0];
+        let parsedImage = parse(imageWithoutDigest);
         const tagName =
             parsedImage && parsedImage.tag ? parsedImage.tag : 'latest';
 
-        if (!parsedImage) {
-            parsedImage = { domain: '', path: imageName, tag: tagName };
+        if (!parsedImage || !parsedImage.path) {
+            parsedImage = {
+                domain: '',
+                path: imageWithoutDigest,
+                tag: tagName,
+            };
         }
 
         const parsedTag = parseSemver(transformTag(transformTags, tagName));
@@ -623,11 +737,21 @@ export class Nomad extends Watcher {
         let watchDigest = false;
         if (watchDigestMeta !== undefined && watchDigestMeta !== '') {
             watchDigest = watchDigestMeta.toLowerCase() === 'true';
-        } else if (
-            !isSemver &&
-            this.configuration.watchdigestdefault !== undefined
-        ) {
-            watchDigest = this.configuration.watchdigestdefault;
+        } else if (!isSemver) {
+            const domain = parsedImage.domain || 'registry-1.docker.io';
+            const registryProvider = findRegistryProvider(
+                domain,
+                getRegistries(),
+            );
+            if (registryProvider) {
+                watchDigest = registryProvider.shouldWatchDigest(
+                    undefined,
+                    parsedImage.path,
+                    this.configuration.watchdigestdefault,
+                );
+            } else if (this.configuration.watchdigestdefault !== undefined) {
+                watchDigest = this.configuration.watchdigestdefault;
+            }
         }
 
         const currentDigest = extractDigestFromImage(imageName);
@@ -675,15 +799,15 @@ export class Nomad extends Watcher {
     // ─── Version lookup & Tag filtering ───────────────────────────────────────
 
     async findNewVersion(container: Container, logContainer: any) {
-        const registries = getRegistries();
-        const registryProvider = registries[container.image.registry.name];
-        const result: any = { tag: container.image.tag.value };
-
-        if (!registryProvider) {
+        let registryProvider;
+        try {
+            registryProvider = getRegistry(container.image.registry.name);
+        } catch {
             throw new Error(
                 `Unsupported registry (${container.image.registry.name})`,
             );
         }
+        const result: any = { tag: container.image.tag.value };
 
         const watchDigestMeta =
             container.labels?.[wudWatchDigest] ??
@@ -691,14 +815,17 @@ export class Nomad extends Watcher {
         let watchDigest = false;
         if (watchDigestMeta !== undefined && watchDigestMeta !== '') {
             watchDigest = watchDigestMeta.toLowerCase() === 'true';
-        } else if (container.image.digest?.watch !== undefined) {
-            watchDigest = container.image.digest.watch;
         } else if (!container.image.tag.semver) {
             watchDigest = registryProvider.shouldWatchDigest(
                 undefined,
                 container.image.name,
                 this.configuration.watchdigestdefault,
             );
+        }
+        if (container.image.digest) {
+            container.image.digest.watch = watchDigest;
+        } else {
+            container.image.digest = { watch: watchDigest };
         }
 
         if (!container.image.tag.semver && !watchDigest) {
@@ -758,14 +885,22 @@ export class Nomad extends Watcher {
         let filteredTags = tags;
 
         if (container.includeTags) {
-            const includeTagsRegex = new RegExp(container.includeTags);
+            const includePattern = interpolateTagFilter(
+                container.includeTags,
+                container,
+            );
+            const includeTagsRegex = new RegExp(includePattern);
             filteredTags = filteredTags.filter((tag) =>
                 includeTagsRegex.test(tag),
             );
         }
 
         if (container.excludeTags) {
-            const excludeTagsRegex = new RegExp(container.excludeTags);
+            const excludePattern = interpolateTagFilter(
+                container.excludeTags,
+                container,
+            );
+            const excludeTagsRegex = new RegExp(excludePattern);
             filteredTags = filteredTags.filter(
                 (tag) => !excludeTagsRegex.test(tag),
             );
@@ -882,8 +1017,9 @@ export class Nomad extends Watcher {
 
     private normalizeContainer(container: Container): Container {
         const containerWithNormalizedImage = container;
-        const registryProvider = Object.values(getRegistries()).find(
-            (provider) => provider.match(container.image.registry.url),
+        const registryProvider = findRegistryProvider(
+            container.image.registry.url,
+            getRegistries(),
         );
         if (!registryProvider) {
             this.log.warn(

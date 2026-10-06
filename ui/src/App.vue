@@ -16,7 +16,7 @@
         </v-col>
       </v-row>
     </v-main>
-    <live-watch-hud />
+    <live-watch-hud v-if="authenticated" />
   </v-app>
 </template>
 
@@ -36,6 +36,7 @@ import NavigationDrawer from "@/components/NavigationDrawer.vue";
 import LiveWatchHud from "@/components/LiveWatchHud.vue";
 import SnackBar from "@/components/SnackBar.vue";
 import { getServer } from "@/services/server";
+import { eventService } from "@/services/event";
 import { useRoute } from "vue-router";
 import { useLocale, useTheme } from "vuetify";
 import { currentLocale } from "@/i18n";
@@ -93,6 +94,7 @@ export default defineComponent({
         theme.global.name.value = userData.preferences.theme;
         localStorage.darkMode = String(userData.preferences.theme === "dark");
       }
+      eventService.connect();
     };
 
     const notify = (message: string, level = "info") => {
@@ -116,6 +118,7 @@ export default defineComponent({
     watch(route, async (newRoute) => {
       if (newRoute.name === 'login') {
         user.value = undefined;
+        eventService.disconnect();
       } else if (!user.value) {
         // Fallback auth check if user not set by router guard
         try {
@@ -128,6 +131,13 @@ export default defineComponent({
         }
       }
     }, { immediate: true });
+
+    // Disconnect event stream whenever the user is not authenticated
+    watch(authenticated, (isAuthenticated) => {
+      if (!isAuthenticated) {
+        eventService.disconnect();
+      }
+    });
 
     onUpdated(async () => {
       if (
