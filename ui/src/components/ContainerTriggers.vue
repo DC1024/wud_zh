@@ -7,7 +7,7 @@
         size="24"
         class="mr-2"
       />
-      <span class="text-caption text-grey">{{ $t('loadingTriggers') }}</span>
+      <span class="text-caption text-grey">{{ $t('containers.loadingTriggers') }}</span>
     </div>
     <v-row v-else-if="triggers && triggers.length > 0">
       <v-col v-for="trigger in triggers" :key="trigger.id" lg="6" sm="12">
