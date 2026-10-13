@@ -211,6 +211,7 @@ export default {
   },
   common: {
     copied: "{kind} copied to clipboard",
+    copyFailed: "Unable to copy {kind} to clipboard",
     empty: "(empty)",
   },
   // Labels used as the {kind} of common.copied. Upstream wording kept verbatim

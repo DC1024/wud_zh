@@ -3,6 +3,7 @@ import request from 'supertest';
 import axios from 'axios';
 import * as registryApi from './registry';
 import * as registry from '../registry';
+import Registry from '../registries/Registry';
 import * as hubMirrorStore from '../store/hubMirror';
 
 jest.mock('../registry', () => ({
@@ -66,6 +67,19 @@ describe('API Registry', () => {
         });
     });
 
+    test('registry API masks nested webhook credentials', async () => {
+        const provider = new Registry();
+        provider.type = 'mock';
+        provider.name = 'test';
+        provider.configuration = { webhook: { token: 'private-secret' } };
+        jest.mocked(registry.getState).mockReturnValueOnce({
+            registry: { 'mock.test': provider },
+        } as unknown as registry.RegistryState);
+        const response = await request(app).get('/');
+        expect(response.status).toBe(200);
+        expect(JSON.stringify(response.body)).not.toContain('private-secret');
+        expect(provider.configuration.webhook.token).toBe('private-secret');
+    });
     test('should return 404 for unknown registry', async () => {
         const res = await request(app).get('/mock/unknown');
         expect(res.status).toBe(404);

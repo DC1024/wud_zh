@@ -208,6 +208,7 @@ export default {
   },
   common: {
     copied: "{kind} 已复制到剪贴板",
+    copyFailed: "无法将 {kind} 复制到剪贴板",
     empty: "（空）",
   },
   // 作为 common.copied 的 {kind} 使用；英文值保持与上游完全一致

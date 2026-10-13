@@ -66,11 +66,6 @@
               {{ container.image.tag.value }}
             </v-chip>
           </span>
-        </div>
-        
-        <v-spacer />
-        
-        <div class="d-flex align-center" style="gap: 8px">
           <span v-if="smAndUp && container.updateAvailable" class="d-flex align-center" style="gap: 4px">
             <v-icon>mdi-arrow-right</v-icon>
             <v-tooltip bottom>
@@ -92,7 +87,11 @@
               <span class="text-caption">{{ $t('containers.copyToClipboard') }}</span>
             </v-tooltip>
           </span>
-
+        </div>
+        
+        <v-spacer />
+        
+        <div class="d-flex align-center" style="gap: 8px">
           <span
             v-if="smAndUp && oldestFirst"
             class="text-caption"
@@ -258,6 +257,7 @@
 import { useDisplay } from "vuetify";
 import { getRegistryProviderIcon } from "@/services/registry";
 import { getUser } from "@/services/auth";
+import { copyToClipboard } from "@/services/clipboard";
 import ContainerDetail from "@/components/ContainerDetail.vue";
 import ContainerError from "@/components/ContainerError.vue";
 import ContainerImage from "@/components/ContainerImage.vue";
@@ -387,12 +387,20 @@ export default defineComponent({
       this.$emit("delete-container");
     },
 
-    copyToClipboard(kind: string, value: string) {
-      navigator.clipboard.writeText(value);
-      (this as any).$eventBus.emit(
-        "notify",
-        this.$t("common.copied", { kind: this.$t(kind) }),
-      );
+    async copyToClipboard(kind: string, value: string) {
+      const copied = await copyToClipboard(value);
+      if (copied) {
+        (this as any).$eventBus.emit(
+          "notify",
+          this.$t("common.copied", { kind: this.$t(kind) }),
+        );
+      } else {
+        (this as any).$eventBus.emit(
+          "notify",
+          this.$t("common.copyFailed", { kind: this.$t(kind) }),
+          "warning",
+        );
+      }
     },
 
     collapseDetail() {

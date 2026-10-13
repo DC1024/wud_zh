@@ -33,6 +33,18 @@ type HassSensorKind = 'sensor' | 'binary_sensor' | 'update';
 type HassSensorValue = string | number | boolean;
 type HassDiscoveryOptions = Record<string, HassSensorValue | undefined>;
 
+export interface SummaryPayloadItem {
+    name: string;
+    displayName: string;
+    watcher?: string;
+    stack?: string;
+    kind: string;
+    localValue: string;
+    remoteValue: string;
+    semverDiff?: string;
+    link?: string;
+}
+
 interface HassSensor {
     kind: HassSensorKind;
     topic: string;
@@ -40,6 +52,7 @@ interface HassSensor {
 
 interface HassDiscoverySensor extends HassSensor {
     name?: string;
+    icon?: string;
     options?: HassDiscoveryOptions;
     watcherName?: string;
 }
@@ -47,6 +60,7 @@ interface HassDiscoverySensor extends HassSensor {
 interface HassNamedSensor {
     sensor: HassSensor;
     name: string;
+    icon?: string;
     options?: HassDiscoveryOptions;
 }
 
@@ -122,6 +136,13 @@ class Hass {
         this.log = log;
     }
 
+    private isSummary(): boolean {
+        return (
+            this.configuration.hass.entities === 'summary' ||
+            this.configuration.hass.discovery_entities === 'summary'
+        );
+    }
+
     /**
      * Initialize the component.
      *
@@ -195,6 +216,7 @@ class Hass {
                 stateTopic: sensor.topic,
                 kind: sensor.kind,
                 name: sensor.name,
+                icon: sensor.icon,
                 options: sensor.options,
                 watcherName: sensor.watcherName,
             });
@@ -208,6 +230,51 @@ class Hass {
     }
 
     /**
+     * Publish summary updates to {topic}/updates.
+     */
+    async publishSummaryUpdates() {
+        const updateContainers = (containerStore.getContainers() || []).filter(
+            (c) => c.updateAvailable,
+        );
+
+        const summaryPayload: SummaryPayloadItem[] = updateContainers.map(
+            (container) => {
+                const stack =
+                    container.stack ||
+                    container.labels?.['com.docker.compose.project'];
+                const item: SummaryPayloadItem = {
+                    name: container.name,
+                    displayName: container.displayName || container.name,
+                    kind: container.updateKind?.kind || 'unknown',
+                    localValue: container.updateKind?.localValue || '',
+                    remoteValue: container.updateKind?.remoteValue || '',
+                };
+                if (container.watcher) {
+                    item.watcher = container.watcher;
+                }
+                if (stack) {
+                    item.stack = stack;
+                }
+                if (container.updateKind?.semverDiff) {
+                    item.semverDiff = container.updateKind.semverDiff;
+                }
+                const link = container.result?.link || container.link;
+                if (link) {
+                    item.link = link;
+                }
+                return item;
+            },
+        );
+
+        const updatesTopic = `${this.configuration.topic}/updates`;
+        return this.client.publish(
+            updatesTopic,
+            JSON.stringify(summaryPayload),
+            { retain: true },
+        );
+    }
+
+    /**
      * Add container sensor.
      */
     async addContainerSensor(container: Container) {
@@ -215,6 +282,19 @@ class Hass {
             kind: 'update',
             topic: this.getContainerStateTopic({ container }),
         };
+
+        if (this.isSummary()) {
+            if (this.configuration.hass.discovery) {
+                await this.removeSensor({
+                    discoveryTopic:
+                        this.getDiscoveryTopic(containerStateSensor),
+                });
+            }
+            await this.publishSummaryUpdates();
+            await this.updateContainerSensors(container);
+            return;
+        }
+
         this.log.info(
             `Add hass container update sensor [${containerStateSensor.topic}]`,
         );
@@ -270,6 +350,10 @@ class Hass {
                 discoveryTopic: this.getDiscoveryTopic(containerStateSensor),
             });
         }
+        if (this.isSummary()) {
+            await this.publishSummaryUpdates();
+            await this.updateContainerSensors(container);
+        }
     }
 
     async updateContainerSensors(container: Container) {
@@ -277,6 +361,7 @@ class Hass {
             | 'totalCount'
             | 'totalUpdateCount'
             | 'totalUpdateStatus'
+            | 'updatesSummary'
             | 'watcherTotalCount'
             | 'watcherUpdateCount'
             | 'watcherUpdateStatus',
@@ -304,6 +389,21 @@ class Hass {
                 name: 'Total container update status',
                 options: HASS_BOOLEAN_OPTIONS,
             },
+            updatesSummary: {
+                sensor: {
+                    kind: 'sensor',
+                    topic: `${this.configuration.topic}/updates`,
+                },
+                name: 'updates',
+                icon: sanitizeIcon('mdi:package-up'),
+                options: {
+                    default_entity_id: `sensor.${this.configuration.hass.deviceid}_updates`,
+                    state_topic: `${this.configuration.topic}/update_count`,
+                    json_attributes_topic: `${this.configuration.topic}/updates`,
+                    json_attributes_template:
+                        "{{ {'updates': value_json} | tojson }}",
+                },
+            },
             watcherTotalCount: {
                 sensor: {
                     kind: 'sensor',
@@ -328,6 +428,8 @@ class Hass {
             },
         };
 
+        const isSummary = this.isSummary();
+
         // Publish discovery messages
         if (this.configuration.hass.discovery) {
             const globalSensors = [
@@ -340,72 +442,120 @@ class Hass {
                 options,
             }));
 
-            const watcherSensors = [
-                sensors.watcherTotalCount,
-                sensors.watcherUpdateCount,
-                sensors.watcherUpdateStatus,
-            ].map(({ sensor, name, options }) => ({
-                ...sensor,
-                name,
-                options,
-                watcherName: container.watcher,
-            }));
+            await this.publishDiscoveryMessages(globalSensors);
 
-            await this.publishDiscoveryMessages([
-                ...globalSensors,
-                ...watcherSensors,
-            ]);
+            if (isSummary) {
+                await this.publishDiscoveryMessage({
+                    discoveryTopic: this.getDiscoveryTopic(
+                        sensors.updatesSummary.sensor,
+                    ),
+                    stateTopic: sensors.updatesSummary.sensor.topic,
+                    kind: sensors.updatesSummary.sensor.kind,
+                    name: sensors.updatesSummary.name,
+                    icon: sensors.updatesSummary.icon,
+                    options: sensors.updatesSummary.options,
+                });
+
+                if (container?.watcher) {
+                    for (const sensor of [
+                        sensors.watcherTotalCount,
+                        sensors.watcherUpdateCount,
+                        sensors.watcherUpdateStatus,
+                    ]) {
+                        await this.removeSensor({
+                            discoveryTopic: this.getDiscoveryTopic(
+                                sensor.sensor,
+                            ),
+                        });
+                    }
+                }
+            } else {
+                if (container?.watcher) {
+                    const watcherSensors = [
+                        sensors.watcherTotalCount,
+                        sensors.watcherUpdateCount,
+                        sensors.watcherUpdateStatus,
+                    ].map(({ sensor, name, options }) => ({
+                        ...sensor,
+                        name,
+                        options,
+                        watcherName: container.watcher,
+                    }));
+
+                    await this.publishDiscoveryMessages(watcherSensors);
+                }
+            }
         }
 
         // Count all containers
-        const totalCount = containerStore.getContainers().length;
-        const updateCount = containerStore.getContainers({
-            updateAvailable: true,
-        }).length;
+        const totalCount = (containerStore.getContainers() || []).length;
+        const updateCount = (
+            containerStore.getContainers({
+                updateAvailable: true,
+            }) || []
+        ).length;
 
-        // Count all containers belonging to the current watcher
-        const watcherTotalCount = containerStore.getContainers({
-            watcher: container.watcher,
-        }).length;
-        const watcherUpdateCount = containerStore.getContainers({
-            watcher: container.watcher,
-            updateAvailable: true,
-        }).length;
+        if (isSummary) {
+            await this.updateSensors([
+                { sensor: sensors.totalCount.sensor, value: totalCount },
+                {
+                    sensor: sensors.totalUpdateCount.sensor,
+                    value: updateCount,
+                },
+                {
+                    sensor: sensors.totalUpdateStatus.sensor,
+                    value: updateCount > 0,
+                },
+            ]);
+            await this.publishSummaryUpdates();
+        } else {
+            const watcherTotalCount = (
+                containerStore.getContainers({
+                    watcher: container.watcher,
+                }) || []
+            ).length;
+            const watcherUpdateCount = (
+                containerStore.getContainers({
+                    watcher: container.watcher,
+                    updateAvailable: true,
+                }) || []
+            ).length;
 
-        await this.updateSensors([
-            { sensor: sensors.totalCount.sensor, value: totalCount },
-            {
-                sensor: sensors.totalUpdateCount.sensor,
-                value: updateCount,
-            },
-            {
-                sensor: sensors.totalUpdateStatus.sensor,
-                value: updateCount > 0,
-            },
-            {
-                sensor: sensors.watcherTotalCount.sensor,
-                value: watcherTotalCount,
-            },
-            {
-                sensor: sensors.watcherUpdateCount.sensor,
-                value: watcherUpdateCount,
-            },
-            {
-                sensor: sensors.watcherUpdateStatus.sensor,
-                value: watcherUpdateCount > 0,
-            },
-        ]);
+            await this.updateSensors([
+                { sensor: sensors.totalCount.sensor, value: totalCount },
+                {
+                    sensor: sensors.totalUpdateCount.sensor,
+                    value: updateCount,
+                },
+                {
+                    sensor: sensors.totalUpdateStatus.sensor,
+                    value: updateCount > 0,
+                },
+                {
+                    sensor: sensors.watcherTotalCount.sensor,
+                    value: watcherTotalCount,
+                },
+                {
+                    sensor: sensors.watcherUpdateCount.sensor,
+                    value: watcherUpdateCount,
+                },
+                {
+                    sensor: sensors.watcherUpdateStatus.sensor,
+                    value: watcherUpdateCount > 0,
+                },
+            ]);
 
-        // Delete watcher sensors when watcher does not exist anymore
-        if (watcherTotalCount === 0 && this.configuration.hass.discovery) {
-            for (const sensor of [
-                sensors.watcherTotalCount,
-                sensors.watcherUpdateCount,
-                sensors.watcherUpdateStatus,
-            ]) {
-                await this.removeSensor({
-                    discoveryTopic: this.getDiscoveryTopic(sensor.sensor),
-                });
+            // Delete watcher sensors when watcher does not exist anymore
+            if (watcherTotalCount === 0 && this.configuration.hass.discovery) {
+                for (const sensor of [
+                    sensors.watcherTotalCount,
+                    sensors.watcherUpdateCount,
+                    sensors.watcherUpdateStatus,
+                ]) {
+                    await this.removeSensor({
+                        discoveryTopic: this.getDiscoveryTopic(sensor.sensor),
+                    });
+                }
             }
         }
     }
@@ -421,6 +571,15 @@ class Hass {
             kind: 'binary_sensor',
             topic: `${this.configuration.topic}/${watcher.name}/running`,
         };
+
+        if (this.isSummary()) {
+            if (this.configuration.hass.discovery) {
+                await this.removeSensor({
+                    discoveryTopic: this.getDiscoveryTopic(watcherStatusSensor),
+                });
+            }
+            return;
+        }
 
         // Publish discovery messages
         if (this.configuration.hass.discovery) {
@@ -590,7 +749,14 @@ class Hass {
             );
         } finally {
             const currentContainer =
-                containerStore.getContainer(container.id) || container;
+                (containerStore.getContainers() || []).find(
+                    (c) =>
+                        c.watcher === watcher &&
+                        (c.name === container.name ||
+                            c.name.replace(/\./g, '-') === containerName),
+                ) ||
+                containerStore.getContainer(container.id) ||
+                container;
             await this.client.publish(
                 stateTopic,
                 JSON.stringify({
@@ -599,6 +765,8 @@ class Hass {
                 }),
                 { retain: true },
             );
+            await this.publishSummaryUpdates();
+            await this.updateContainerSensors(currentContainer);
         }
     }
 

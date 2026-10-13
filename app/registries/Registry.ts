@@ -11,6 +11,13 @@ const MAX_RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_BACKOFF_BASE_MS = 2000;
 const MAX_RETRY_AFTER_MS = 60000;
 
+export interface RegistryPushHint {
+    host: string;
+    repository: string;
+    tag: string;
+    digest: string;
+}
+
 export interface RegistryManifest {
     digest?: string;
     version?: number;
@@ -42,13 +49,30 @@ export interface RegistryTagsList {
     tags: string[];
 }
 
+export class UnsupportedArtifactError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'UnsupportedArtifactError';
+        Object.setPrototypeOf(this, UnsupportedArtifactError.prototype);
+    }
+}
+
+export function isNonContainerArtifactError(error: unknown): boolean {
+    return (
+        error instanceof UnsupportedArtifactError ||
+        (error instanceof Error && error.name === 'UnsupportedArtifactError')
+    );
+}
+
 export interface RegistryManifestResponse {
     schemaVersion: number;
     mediaType?: string;
+    artifactType?: string;
     manifests?: {
         digest: string;
         mediaType: string;
-        platform: {
+        artifactType?: string;
+        platform?: {
             architecture: string;
             os: string;
             variant?: string;
@@ -58,9 +82,121 @@ export interface RegistryManifestResponse {
         digest: string;
         mediaType: string;
     };
+    layers?: {
+        digest?: string;
+        mediaType?: string;
+        size?: number;
+    }[];
     history?: {
         v1Compatibility: string;
     }[];
+}
+
+export function isNonContainerArtifact(
+    manifest: RegistryManifestResponse,
+): boolean {
+    if (!manifest) {
+        return false;
+    }
+
+    if (
+        manifest.artifactType &&
+        manifest.artifactType.startsWith('application/vnd.cncf.helm.')
+    ) {
+        return true;
+    }
+
+    if (manifest.config?.mediaType) {
+        if (
+            manifest.config.mediaType.startsWith('application/vnd.cncf.helm.')
+        ) {
+            return true;
+        }
+        const isContainerConfig =
+            manifest.config.mediaType ===
+                'application/vnd.docker.container.image.v1+json' ||
+            manifest.config.mediaType ===
+                'application/vnd.oci.image.config.v1+json';
+        if (!isContainerConfig) {
+            return true;
+        }
+    }
+
+    if (manifest.layers && Array.isArray(manifest.layers)) {
+        const hasHelmLayer = manifest.layers.some(
+            (layer) =>
+                layer.mediaType?.startsWith('application/vnd.cncf.helm.') ||
+                layer.mediaType ===
+                    'application/vnd.cncf.helm.chart.content.v1.tar+gzip',
+        );
+        if (hasHelmLayer) {
+            return true;
+        }
+    }
+
+    if (manifest.artifactType) {
+        return true;
+    }
+
+    if (
+        manifest.manifests &&
+        Array.isArray(manifest.manifests) &&
+        manifest.manifests.length > 0 &&
+        manifest.manifests.every(
+            (m) =>
+                m.artifactType?.startsWith('application/vnd.cncf.helm.') ||
+                m.mediaType?.startsWith('application/vnd.cncf.helm.'),
+        )
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+export interface CandidateTagResolution {
+    tag?: string;
+    remoteDigest?: RegistryManifest;
+}
+
+export async function resolveCandidateTag(
+    registryProvider: Registry,
+    image: ContainerImage,
+    tagsCandidates: string[],
+    logContainer?: {
+        info: (msg: string) => void;
+        warn?: (msg: string) => void;
+        debug?: (msg: string) => void;
+    },
+): Promise<CandidateTagResolution> {
+    for (const candidateTag of tagsCandidates) {
+        if (typeof registryProvider.getImageManifestDigest !== 'function') {
+            return { tag: candidateTag };
+        }
+        const candidateImage: ContainerImage = {
+            ...image,
+            tag: {
+                ...image.tag,
+                value: candidateTag,
+            },
+        };
+        try {
+            const remoteDigest =
+                await registryProvider.getImageManifestDigest(candidateImage);
+            return { tag: candidateTag, remoteDigest };
+        } catch (e: any) {
+            if (isNonContainerArtifactError(e)) {
+                if (logContainer && typeof logContainer.info === 'function') {
+                    logContainer.info(
+                        `Candidate tag ${candidateTag} is a non-container OCI artifact, skipping`,
+                    );
+                }
+                continue;
+            }
+            throw e;
+        }
+    }
+    return {};
 }
 
 export function getUserAgent(): string {
@@ -85,10 +221,14 @@ export class Registry extends Component {
             configuration !== null &&
             typeof configuration === 'object' &&
             !Array.isArray(configuration);
-        const { concurrency, proxy, ...providerConfiguration } =
+        const { concurrency, proxy, webhook, ...providerConfiguration } =
             isObjectConfiguration
                 ? configuration
-                : { concurrency: undefined, proxy: undefined };
+                : {
+                      concurrency: undefined,
+                      proxy: undefined,
+                      webhook: undefined,
+                  };
 
         const concurrencyValidated = this.joi
             .number()
@@ -109,6 +249,13 @@ export class Registry extends Component {
             throw proxyValidated.error;
         }
 
+        const webhookValidated = this.joi
+            .object({ token: this.joi.string().min(1).required() })
+            .unknown(false)
+            .optional()
+            .validate(webhook);
+        if (webhookValidated.error) throw webhookValidated.error;
+
         const providerSchema = this.getConfigurationSchema();
         let providerConfigurationValidated = providerSchema.validate(
             isObjectConfiguration ? providerConfiguration : configuration,
@@ -117,7 +264,8 @@ export class Registry extends Component {
             providerConfigurationValidated.error &&
             isObjectConfiguration &&
             (Object.hasOwn(configuration, 'concurrency') ||
-                Object.hasOwn(configuration, 'proxy')) &&
+                Object.hasOwn(configuration, 'proxy') ||
+                Object.hasOwn(configuration, 'webhook')) &&
             Object.keys(providerConfiguration).length === 0
         ) {
             const anonymousConfigurationValidated = providerSchema.validate('');
@@ -136,10 +284,30 @@ export class Registry extends Component {
                 ? providerConfigurationValidated.value
                 : {}),
             concurrency: concurrencyValidated.value,
+            ...(webhookValidated.value !== undefined
+                ? { webhook: webhookValidated.value }
+                : {}),
             ...(proxyValidated.value !== undefined
                 ? { proxy: proxyValidated.value }
                 : {}),
         };
+    }
+
+    parseWebhook(body: unknown): RegistryPushHint[] {
+        void body;
+        throw new Error('Registry webhook format is unsupported');
+    }
+
+    maskConfiguration(
+        configuration?: ComponentConfiguration,
+    ): ComponentConfiguration {
+        const masked = { ...(configuration || this.configuration) };
+        if (masked.webhook?.token)
+            masked.webhook = {
+                ...masked.webhook,
+                token: Registry.mask(masked.webhook.token),
+            };
+        return masked;
     }
 
     /**
@@ -261,6 +429,14 @@ export class Registry extends Component {
             });
         if (responseManifests) {
             log.debug(`Found manifests [${JSON.stringify(responseManifests)}]`);
+            if (isNonContainerArtifact(responseManifests)) {
+                this.log.debug(
+                    `${this.getId()} - Manifest for ${image.name}:${tagOrDigest} is a non-container OCI artifact`,
+                );
+                throw new UnsupportedArtifactError(
+                    `Unsupported artifact: ${image.name}:${tagOrDigest} is a non-container OCI artifact`,
+                );
+            }
             if (responseManifests.schemaVersion === 2) {
                 log.debug('Manifests found with schemaVersion = 2');
                 log.debug(
@@ -276,12 +452,23 @@ export class Registry extends Component {
                         `Filter manifest for [arch=${image.architecture}, os=${image.os}, variant=${image.variant}]`,
                     );
                     let manifestFound;
-                    const manifestFounds = responseManifests.manifests.filter(
-                        (manifest: any) =>
-                            manifest.platform.architecture ===
-                                image.architecture &&
-                            manifest.platform.os === image.os,
-                    );
+                    const manifestFounds = responseManifests.manifests
+                        ? responseManifests.manifests.filter(
+                              (manifest: any) =>
+                                  manifest.platform &&
+                                  manifest.platform.architecture ===
+                                      image.architecture &&
+                                  manifest.platform.os === image.os &&
+                                  (!manifest.artifactType ||
+                                      !manifest.artifactType.startsWith(
+                                          'application/vnd.cncf.helm.',
+                                      )) &&
+                                  (!manifest.mediaType ||
+                                      !manifest.mediaType.startsWith(
+                                          'application/vnd.cncf.helm.',
+                                      )),
+                          )
+                        : [];
 
                     // 1 manifest matching al least? Get the first one (better than nothing)
                     if (manifestFounds.length > 0) {
@@ -433,6 +620,11 @@ export class Registry extends Component {
                     Accept: 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json',
                 },
             });
+            if (manifest && isNonContainerArtifact(manifest)) {
+                throw new UnsupportedArtifactError(
+                    `Unsupported artifact: ${image.name}@${manifestDigest} is a non-container OCI artifact`,
+                );
+            }
             configDigest = manifest?.config?.digest;
         }
 
@@ -637,6 +829,22 @@ export class Registry extends Component {
         { username?: string; password?: string } | undefined
     > {
         return undefined;
+    }
+
+    /**
+     * Resolve the first valid container image candidate tag from a list of candidate tags,
+     * skipping non-container OCI artifacts (such as Helm charts).
+     */
+    async resolveCandidateTag(
+        image: ContainerImage,
+        tagsCandidates: string[],
+        logContainer?: {
+            info: (msg: string) => void;
+            warn?: (msg: string) => void;
+            debug?: (msg: string) => void;
+        },
+    ): Promise<CandidateTagResolution> {
+        return resolveCandidateTag(this, image, tagsCandidates, logContainer);
     }
 }
 

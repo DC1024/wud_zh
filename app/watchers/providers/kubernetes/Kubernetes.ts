@@ -45,6 +45,10 @@ import {
     resolveRegistry,
     isRegistryRegistered,
 } from '../../../registries/registryProvider';
+import {
+    resolveCandidateTag,
+    isNonContainerArtifactError,
+} from '../../../registries/Registry';
 import { isOneshot } from '../../../runtime/mode';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
@@ -404,7 +408,7 @@ export class Kubernetes extends Watcher {
     /**
      * Watch a single WUD Container (find new version, update store).
      */
-    async watchContainer(container: Container) {
+    protected async checkContainer(container: Container) {
         const logContainer = this.log.child({
             container: fullName(container),
         }) as Logger;
@@ -834,7 +838,9 @@ export class Kubernetes extends Watcher {
         }
 
         // Determine if semver
-        const parsedTag = parseSemver(transformTag(transformTags, tagName));
+        const parsedTag = parseSemver(
+            transformTag(transformTags, tagName, containerSpec.name),
+        );
         const isSemver = parsedTag !== null && parsedTag !== undefined;
 
         // Determine digest watching
@@ -967,17 +973,38 @@ export class Kubernetes extends Watcher {
             logContainer,
         );
 
+        const { tag: candidateTag, remoteDigest: candidateRemoteDigest } =
+            await resolveCandidateTag(
+                registryProvider,
+                container.image,
+                tagsCandidates,
+                logContainer,
+            );
+
         if (watchDigest && container.image.digest.repo) {
             const imageToGetDigestFrom = JSON.parse(
                 JSON.stringify(container.image),
             );
-            if (tagsCandidates.length > 0) {
-                [imageToGetDigestFrom.tag.value] = tagsCandidates;
+            if (candidateTag) {
+                imageToGetDigestFrom.tag.value = candidateTag;
             }
-            const remoteDigest =
-                await registryProvider.getImageManifestDigest(
-                    imageToGetDigestFrom,
-                );
+            let remoteDigest = candidateRemoteDigest;
+            if (!remoteDigest) {
+                try {
+                    remoteDigest =
+                        await registryProvider.getImageManifestDigest(
+                            imageToGetDigestFrom,
+                        );
+                } catch (e: any) {
+                    if (isNonContainerArtifactError(e)) {
+                        logContainer.warn(
+                            `Image ${imageToGetDigestFrom.name}:${imageToGetDigestFrom.tag.value} is a non-container OCI artifact`,
+                        );
+                        return result;
+                    }
+                    throw e;
+                }
+            }
             result.digest = remoteDigest.digest;
             result.created = remoteDigest.created;
 
@@ -992,8 +1019,8 @@ export class Kubernetes extends Watcher {
             }
         }
 
-        if (tagsCandidates && tagsCandidates.length > 0) {
-            [result.tag] = tagsCandidates;
+        if (candidateTag) {
+            result.tag = candidateTag;
         }
         return result;
     }
@@ -1099,8 +1126,9 @@ export class Kubernetes extends Watcher {
 
             filteredTags = filteredTags.filter(
                 (tag) =>
-                    parseSemver(transformTag(container.transformTags, tag)) !==
-                    null,
+                    parseSemver(
+                        transformTag(container.transformTags, tag, container),
+                    ) !== null,
             );
 
             // Keep only tags with the same number of numeric segments
@@ -1120,10 +1148,12 @@ export class Kubernetes extends Watcher {
                 const tagTransformed = transformTag(
                     container.transformTags,
                     tag,
+                    container,
                 );
                 const currentTransformed = transformTag(
                     container.transformTags,
                     container.image.tag.value,
+                    container,
                 );
                 return (
                     tagTransformed !== currentTransformed &&
@@ -1133,8 +1163,8 @@ export class Kubernetes extends Watcher {
 
             filteredTags.sort((t1, t2) => {
                 const greater = isGreaterSemver(
-                    transformTag(container.transformTags, t2),
-                    transformTag(container.transformTags, t1),
+                    transformTag(container.transformTags, t2, container),
+                    transformTag(container.transformTags, t1, container),
                 );
                 return greater ? 1 : -1;
             });

@@ -5,6 +5,7 @@ import Docker, {
     reconcileLabels,
     reconcileCmd,
     reconcileEntrypoint,
+    createPullProgressLogger,
 } from './Docker';
 import { HookManager } from '../../hooks/HookManager';
 import log from '../../../log';
@@ -137,6 +138,12 @@ test('validateConfiguration should return validated configuration when valid', a
     expect(validatedConfiguration).toStrictEqual({
         ...configurationValid,
         rollbacktitle: Trigger.DEFAULT_ROLLBACK_TITLE,
+        events: ['available'],
+        successtitle: 'Update SUCCESS for ${container.name}',
+        successbody:
+            'Container ${container.name} has been successfully updated.',
+        failuretitle: 'Update FAILED for ${container.name}',
+        failurebody: 'Container ${container.name} update failed: ${error}',
         rollbackbody: Trigger.DEFAULT_ROLLBACK_BODY,
     });
 });
@@ -433,6 +440,288 @@ test('pullImage should resolve when pull stream completes successfully without e
     ).resolves.toBeUndefined();
 });
 
+test('pullImage should pass onProgress callback to followProgress and log progress', async () => {
+    let capturedOnProgress;
+    const mockDockerApi = {
+        pull: jest.fn().mockResolvedValue({}),
+        modem: {
+            followProgress: jest.fn((_stream, onFinished, onProgress) => {
+                capturedOnProgress = onProgress;
+                if (onProgress) {
+                    onProgress({
+                        id: 'layer1',
+                        status: 'Downloading',
+                        progress: '[====> ] 20MB/50MB',
+                    });
+                    onProgress({
+                        id: 'layer1',
+                        status: 'Download complete',
+                    });
+                }
+                onFinished(null, [{ status: 'Download complete' }]);
+            }),
+        },
+    };
+
+    const mockLog = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+    };
+
+    await docker.pullImage(
+        mockDockerApi,
+        undefined,
+        'test/test:1.2.3',
+        mockLog,
+    );
+
+    expect(capturedOnProgress).toBeDefined();
+    expect(mockLog.info).toHaveBeenCalledWith('Pull image test/test:1.2.3');
+    expect(mockLog.info).toHaveBeenCalledWith(
+        'Layer layer1: Downloading [====> ] 20MB/50MB',
+    );
+    expect(mockLog.info).toHaveBeenCalledWith(
+        'Layer layer1: Download complete',
+    );
+    expect(mockLog.info).toHaveBeenCalledWith(
+        'Image test/test:1.2.3 pulled with success',
+    );
+});
+
+describe('createPullProgressLogger', () => {
+    let mockLogger;
+
+    beforeEach(() => {
+        mockLogger = {
+            info: jest.fn(),
+            warn: jest.fn(),
+            error: jest.fn(),
+            debug: jest.fn(),
+        };
+    });
+
+    test('should ignore empty, null, or undefined events', () => {
+        const logger = createPullProgressLogger(mockLogger);
+        logger(null);
+        logger(undefined);
+        logger({});
+        expect(mockLogger.info).not.toHaveBeenCalled();
+    });
+
+    test('should log layer status changes immediately', () => {
+        const logger = createPullProgressLogger(mockLogger);
+        logger({ id: 'layer1', status: 'Pulling fs layer' });
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[=> ] 10MB/50MB',
+        });
+        logger({ id: 'layer1', status: 'Download complete' });
+        logger({
+            id: 'layer1',
+            status: 'Extracting',
+            progress: '[==> ] 20MB/50MB',
+        });
+        logger({ id: 'layer1', status: 'Pull complete' });
+
+        expect(mockLogger.info).toHaveBeenCalledTimes(5);
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            1,
+            'Layer layer1: Pulling fs layer',
+        );
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            2,
+            'Layer layer1: Downloading [=> ] 10MB/50MB',
+        );
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            3,
+            'Layer layer1: Download complete',
+        );
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            4,
+            'Layer layer1: Extracting [==> ] 20MB/50MB',
+        );
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            5,
+            'Layer layer1: Pull complete',
+        );
+    });
+
+    test('should calculate percentage when progressDetail is provided without progress string', () => {
+        const logger = createPullProgressLogger(mockLogger);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progressDetail: { current: 250, total: 1000 },
+        });
+
+        expect(mockLogger.info).toHaveBeenCalledWith(
+            'Layer layer1: Downloading [25%]',
+        );
+    });
+
+    test('should handle layer event without status', () => {
+        const logger = createPullProgressLogger(mockLogger);
+        logger({ id: 'layer1', progress: '[===> ] 30MB/50MB' });
+
+        expect(mockLogger.info).toHaveBeenCalledWith(
+            'Layer layer1 [===> ] 30MB/50MB',
+        );
+    });
+
+    test('should throttle in-progress updates within throttleMs', () => {
+        const nowSpy = jest.spyOn(Date, 'now');
+        nowSpy.mockReturnValue(10000);
+
+        const logger = createPullProgressLogger(mockLogger, 2000);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[> ] 10MB/50MB',
+        });
+        expect(mockLogger.info).toHaveBeenCalledTimes(1);
+
+        // 500ms later: same status, updated progress -> throttled
+        nowSpy.mockReturnValue(10500);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[=> ] 15MB/50MB',
+        });
+        expect(mockLogger.info).toHaveBeenCalledTimes(1);
+
+        // 1900ms later: same status, updated progress -> throttled
+        nowSpy.mockReturnValue(11900);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[==> ] 20MB/50MB',
+        });
+        expect(mockLogger.info).toHaveBeenCalledTimes(1);
+
+        // 2000ms later: >= throttleMs -> logged
+        nowSpy.mockReturnValue(12000);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[===> ] 30MB/50MB',
+        });
+        expect(mockLogger.info).toHaveBeenCalledTimes(2);
+        expect(mockLogger.info).toHaveBeenLastCalledWith(
+            'Layer layer1: Downloading [===> ] 30MB/50MB',
+        );
+
+        nowSpy.mockRestore();
+    });
+
+    test('should not log duplicate events with same progress', () => {
+        const nowSpy = jest.spyOn(Date, 'now');
+        nowSpy.mockReturnValue(10000);
+
+        const logger = createPullProgressLogger(mockLogger, 2000);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[> ] 10MB/50MB',
+        });
+        expect(mockLogger.info).toHaveBeenCalledTimes(1);
+
+        // 3000ms later, but exact same progress -> not logged
+        nowSpy.mockReturnValue(13000);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[> ] 10MB/50MB',
+        });
+        expect(mockLogger.info).toHaveBeenCalledTimes(1);
+
+        nowSpy.mockRestore();
+    });
+
+    test('should not throttle when throttleMs is 0', () => {
+        const logger = createPullProgressLogger(mockLogger, 0);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[> ] 10MB/50MB',
+        });
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[=> ] 15MB/50MB',
+        });
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[==> ] 20MB/50MB',
+        });
+
+        expect(mockLogger.info).toHaveBeenCalledTimes(3);
+    });
+
+    test('should track multiple layers independently', () => {
+        const logger = createPullProgressLogger(mockLogger, 2000);
+        logger({
+            id: 'layer1',
+            status: 'Downloading',
+            progress: '[> ] 10MB/50MB',
+        });
+        logger({
+            id: 'layer2',
+            status: 'Downloading',
+            progress: '[> ] 5MB/20MB',
+        });
+
+        expect(mockLogger.info).toHaveBeenCalledWith(
+            'Layer layer1: Downloading [> ] 10MB/50MB',
+        );
+        expect(mockLogger.info).toHaveBeenCalledWith(
+            'Layer layer2: Downloading [> ] 5MB/20MB',
+        );
+    });
+
+    test('should log global status events and handle Status: prefix', () => {
+        const logger = createPullProgressLogger(mockLogger);
+        logger({ status: 'Pulling from library/ubuntu' });
+        logger({ status: 'Digest: sha256:123456' });
+        logger({ status: 'Status: Downloaded newer image for ubuntu:latest' });
+
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            1,
+            'Status: Pulling from library/ubuntu',
+        );
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            2,
+            'Status: Digest: sha256:123456',
+        );
+        expect(mockLogger.info).toHaveBeenNthCalledWith(
+            3,
+            'Status: Downloaded newer image for ubuntu:latest',
+        );
+    });
+
+    test('should throttle repeated global status events', () => {
+        const nowSpy = jest.spyOn(Date, 'now');
+        nowSpy.mockReturnValue(10000);
+
+        const logger = createPullProgressLogger(mockLogger, 2000);
+        logger({ status: 'Downloading', progress: '10%' });
+        expect(mockLogger.info).toHaveBeenCalledTimes(1);
+
+        nowSpy.mockReturnValue(10500);
+        logger({ status: 'Downloading', progress: '15%' });
+        expect(mockLogger.info).toHaveBeenCalledTimes(1);
+
+        nowSpy.mockReturnValue(12500);
+        logger({ status: 'Downloading', progress: '25%' });
+        expect(mockLogger.info).toHaveBeenCalledTimes(2);
+
+        nowSpy.mockRestore();
+    });
+});
+
 test('removeImage should pull image from dockerApi', async () => {
     await expect(
         docker.removeImage(
@@ -481,7 +770,7 @@ test('clone should clone an existing container spec', async () => {
             a: 'a',
             b: 'b',
         },
-        Image: 'test/test:2.0.0',
+        Image: 'docker.io/test/test:2.0.0',
         configA: 'a',
         configB: 'b',
         name: 'test',
@@ -808,7 +1097,7 @@ describe('cloneContainer with image reconciliation', () => {
         );
 
         expect(clone.name).toEqual('my-app');
-        expect(clone.Image).toEqual('my-app:2.0.0');
+        expect(clone.Image).toEqual('docker.io/library/my-app:2.0.0');
         expect(clone.Env).toEqual([
             'PATH=/usr/local/bin:/bin',
             'VERSION=2.0.0',
@@ -1167,6 +1456,125 @@ test('trigger should skip and return without error when updateAvailable is false
     watcherSpy.mockRestore();
 });
 
+test('trigger should skip and return when newTag is null or not resolvable (fixes #1007)', async () => {
+    const watcherSpy = jest.spyOn(docker, 'getWatcher');
+    await expect(
+        docker.trigger({
+            updateAvailable: true,
+            watcher: 'test',
+            id: '123456789',
+            name: 'container-name',
+            image: {
+                name: 'test/test',
+                tag: { value: '1.0.0' },
+                registry: {
+                    name: 'hub',
+                    url: 'my-registry',
+                },
+            },
+            result: {
+                tag: null,
+            },
+            updateKind: {
+                kind: 'tag',
+                remoteValue: null,
+            },
+        }),
+    ).resolves.toBeUndefined();
+
+    expect(watcherSpy).not.toHaveBeenCalled();
+    watcherSpy.mockRestore();
+});
+
+test('trigger should skip when updateKind is unknown and remote tag equals current tag (fixes #1007)', async () => {
+    const watcherSpy = jest.spyOn(docker, 'getWatcher');
+    await expect(
+        docker.trigger({
+            updateAvailable: true,
+            watcher: 'test',
+            id: '123456789',
+            name: 'container-name',
+            image: {
+                name: 'test/test',
+                tag: { value: '1.0.0' },
+                registry: {
+                    name: 'hub',
+                    url: 'my-registry',
+                },
+            },
+            result: {
+                tag: '1.0.0',
+            },
+            updateKind: {
+                kind: 'unknown',
+            },
+        }),
+    ).resolves.toBeUndefined();
+
+    expect(watcherSpy).not.toHaveBeenCalled();
+    watcherSpy.mockRestore();
+});
+
+test('trigger should skip when container is already running the latest image (fixes #1007)', async () => {
+    const createContainer = jest.fn();
+    const dockerApi = {
+        getContainer: jest.fn(() => ({
+            inspect: () =>
+                Promise.resolve({
+                    Name: '/container-name',
+                    Id: '123456798',
+                    Image: 'sha256:same-image-hash',
+                    State: { Running: true },
+                }),
+            stop: jest.fn(),
+            remove: jest.fn(),
+            start: jest.fn(),
+        })),
+        createContainer,
+        pull: jest.fn(() => Promise.resolve()),
+        getImage: jest.fn((imageRef) => ({
+            inspect: () =>
+                Promise.resolve({
+                    Id: 'sha256:same-image-hash',
+                }),
+        })),
+        modem: {
+            followProgress: (pullStream: any, res: any) => res(),
+        },
+    };
+
+    const watcherSpy = jest.spyOn(docker, 'getWatcher').mockReturnValue({
+        dockerApi,
+    } as any);
+
+    await expect(
+        docker.trigger({
+            updateAvailable: true,
+            watcher: 'test',
+            id: '123456789',
+            name: 'container-name',
+            image: {
+                name: 'test/test',
+                tag: { value: '1.0.0' },
+                registry: {
+                    name: 'hub',
+                    url: 'my-registry',
+                },
+            },
+            result: {
+                tag: '2.0.0',
+            },
+            updateKind: {
+                kind: 'tag',
+                remoteValue: '2.0.0',
+            },
+        }),
+    ).resolves.toBeUndefined();
+
+    watcherSpy.mockRestore();
+    expect(createContainer).not.toHaveBeenCalled();
+});
+
 test('trigger should throw when watcher is not found', async () => {
     const watcherSpy = jest
         .spyOn(docker, 'getWatcher')
@@ -1347,6 +1755,7 @@ test('trigger should delegate to a helper container when selfupdate is enabled',
     expect(createContainer).toHaveBeenCalledTimes(1);
     const helperSpec = createContainer.mock.calls[0][0];
     expect(helperSpec.name).toEqual('wud-self-update');
+    expect(helperSpec.Labels).toEqual({ 'wud.watch': 'false' });
     // The helper runs the image WUD runs right now, not the one being installed.
     expect(helperSpec.Image).toEqual('sha256:currentimage');
     // Kept after the run: its logs are the only record if the swap fails.
@@ -1647,6 +2056,7 @@ describe('performUpdate rollback branch', () => {
             wait: jest.fn(() => Promise.resolve()),
         };
         const newContainer = {
+            id: 'new-container-id',
             inspect: () =>
                 Promise.resolve({
                     State: {
@@ -1787,5 +2197,325 @@ describe('performUpdate rollback branch', () => {
             'my-registry/test/test:1.2.3',
         );
         expect(currentContainer.remove).toHaveBeenCalled();
+    });
+
+    describe('Issue #1393 - Post-update reconciliation in trigger', () => {
+        test('should call watcher.reconcileContainer on plain update success', async () => {
+            const { dockerApi } = buildGatedMocks();
+            const reconcileContainerMock = jest.fn(() => Promise.resolve());
+            const watcherSpy = jest
+                .spyOn(docker, 'getWatcher')
+                .mockReturnValue({
+                    dockerApi,
+                    reconcileContainer: reconcileContainerMock,
+                });
+
+            await docker.performUpdate(gatedContainer());
+
+            expect(reconcileContainerMock).toHaveBeenCalledWith(
+                'new-container-id',
+                {
+                    oldContainerId: 'aaaaaaaaaaaa',
+                    forceRefresh: true,
+                },
+            );
+
+            watcherSpy.mockRestore();
+        });
+
+        test('should call watcher.reconcileContainer on gated update success', async () => {
+            const { dockerApi } = buildGatedMocks({ healthStatus: 'healthy' });
+            const reconcileContainerMock = jest.fn(() => Promise.resolve());
+            const watcherSpy = jest
+                .spyOn(docker, 'getWatcher')
+                .mockReturnValue({
+                    dockerApi,
+                    reconcileContainer: reconcileContainerMock,
+                });
+
+            await docker.performUpdate(
+                gatedContainer({ 'wud.rollback.enable': 'true' }),
+                {
+                    gate: {
+                        enabled: true,
+                        window: 100,
+                        interval: 10,
+                        grace: 10,
+                    },
+                },
+            );
+
+            expect(reconcileContainerMock).toHaveBeenCalledWith(
+                'new-container-id',
+                {
+                    oldContainerId: 'aaaaaaaaaaaa',
+                    forceRefresh: true,
+                },
+            );
+
+            watcherSpy.mockRestore();
+        });
+
+        test('should call watcher.reconcileContainer on rollback outcome', async () => {
+            const { dockerApi } = buildGatedMocks({
+                healthStatus: 'unhealthy',
+            });
+            const reconcileContainerMock = jest.fn(() => Promise.resolve());
+            const watcherSpy = jest
+                .spyOn(docker, 'getWatcher')
+                .mockReturnValue({
+                    dockerApi,
+                    reconcileContainer: reconcileContainerMock,
+                });
+
+            await docker.performUpdate(
+                gatedContainer({ 'wud.rollback.enable': 'true' }),
+                {
+                    gate: {
+                        enabled: true,
+                        window: 100,
+                        interval: 10,
+                        grace: 10,
+                    },
+                },
+            );
+
+            expect(reconcileContainerMock).toHaveBeenCalledWith(
+                'aaaaaaaaaaaa',
+                {
+                    forceRefresh: true,
+                },
+            );
+
+            watcherSpy.mockRestore();
+        });
+    });
+});
+
+describe('Docker 29 containerd store & fully qualified image (#1081)', () => {
+    describe('getFullyQualifiedImage', () => {
+        test('should return empty string for empty/undefined input', () => {
+            expect(docker.getFullyQualifiedImage(undefined)).toEqual('');
+            expect(docker.getFullyQualifiedImage('')).toEqual('');
+        });
+
+        test('should qualify official Docker Hub images without tag', () => {
+            expect(docker.getFullyQualifiedImage('nginx')).toEqual(
+                'docker.io/library/nginx',
+            );
+        });
+
+        test('should qualify official Docker Hub images with tag', () => {
+            expect(docker.getFullyQualifiedImage('nginx:1.31.2')).toEqual(
+                'docker.io/library/nginx:1.31.2',
+            );
+        });
+
+        test('should qualify official Docker Hub images with library prefix', () => {
+            expect(
+                docker.getFullyQualifiedImage('library/nginx:1.31.2'),
+            ).toEqual('docker.io/library/nginx:1.31.2');
+        });
+
+        test('should qualify user/org Docker Hub images', () => {
+            expect(docker.getFullyQualifiedImage('bitnami/redis:7.0')).toEqual(
+                'docker.io/bitnami/redis:7.0',
+            );
+        });
+
+        test('should qualify docker.io official images missing library prefix', () => {
+            expect(
+                docker.getFullyQualifiedImage('docker.io/nginx:1.31.2'),
+            ).toEqual('docker.io/library/nginx:1.31.2');
+        });
+
+        test('should preserve already fully qualified docker.io images', () => {
+            expect(
+                docker.getFullyQualifiedImage('docker.io/library/nginx:1.31.2'),
+            ).toEqual('docker.io/library/nginx:1.31.2');
+            expect(
+                docker.getFullyQualifiedImage('docker.io/bitnami/redis:7.0'),
+            ).toEqual('docker.io/bitnami/redis:7.0');
+        });
+
+        test('should preserve third-party registries', () => {
+            expect(
+                docker.getFullyQualifiedImage('ghcr.io/owner/repo:1.0.0'),
+            ).toEqual('ghcr.io/owner/repo:1.0.0');
+            expect(
+                docker.getFullyQualifiedImage('quay.io/coreos/etcd:v3.5'),
+            ).toEqual('quay.io/coreos/etcd:v3.5');
+        });
+
+        test('should preserve registry domain with custom port', () => {
+            expect(
+                docker.getFullyQualifiedImage('localhost:5000/my-image:v1'),
+            ).toEqual('localhost:5000/my-image:v1');
+            expect(
+                docker.getFullyQualifiedImage(
+                    'registry.internal:5000/team/app:1.0',
+                ),
+            ).toEqual('registry.internal:5000/team/app:1.0');
+        });
+
+        test('should qualify official images pinned by digest', () => {
+            expect(
+                docker.getFullyQualifiedImage(
+                    'nginx@sha256:45b23d064c0fc53ff7b79ac61ac134e3f4f7ac9b284debc1aaf80d3f539f66fa',
+                ),
+            ).toEqual(
+                'docker.io/library/nginx@sha256:45b23d064c0fc53ff7b79ac61ac134e3f4f7ac9b284debc1aaf80d3f539f66fa',
+            );
+        });
+
+        test('should qualify user images pinned by digest', () => {
+            expect(
+                docker.getFullyQualifiedImage(
+                    'bitnami/redis@sha256:45b23d064c0fc53ff7b79ac61ac134e3f4f7ac9b284debc1aaf80d3f539f66fa',
+                ),
+            ).toEqual(
+                'docker.io/bitnami/redis@sha256:45b23d064c0fc53ff7b79ac61ac134e3f4f7ac9b284debc1aaf80d3f539f66fa',
+            );
+        });
+
+        test('should adopt matching RepoTag from imageSpec if available', () => {
+            const imageSpec = {
+                RepoTags: [
+                    'docker.io/library/nginx:1.31.2',
+                    'docker.io/library/nginx:latest',
+                ],
+            } as any;
+            expect(
+                docker.getFullyQualifiedImage('nginx:1.31.2', imageSpec),
+            ).toEqual('docker.io/library/nginx:1.31.2');
+        });
+
+        test('should adopt exact RepoTag from imageSpec when identical', () => {
+            const imageSpec = {
+                RepoTags: ['custom-registry.io/app:v2'],
+            } as any;
+            expect(
+                docker.getFullyQualifiedImage(
+                    'custom-registry.io/app:v2',
+                    imageSpec,
+                ),
+            ).toEqual('custom-registry.io/app:v2');
+        });
+    });
+
+    describe('cloneContainer with Docker 29 containerd store', () => {
+        test('should set Image to fully qualified name when recreating container with unqualified image (#1081)', () => {
+            const base = {
+                Name: '/local_nginx',
+                Id: 'abc123456789',
+                Config: {
+                    Image: 'nginx:1.31.0',
+                    Env: ['FOO=bar'],
+                },
+                HostConfig: {},
+                NetworkSettings: { Networks: {} },
+            } as any;
+
+            const clone = docker.cloneContainer(base, 'nginx:1.31.2');
+            expect(clone.Image).toEqual('docker.io/library/nginx:1.31.2');
+        });
+
+        test('should use RepoTag from newImageSpec when recreating container (#1081)', () => {
+            const base = {
+                Name: '/local_nginx',
+                Id: 'abc123456789',
+                Config: { Image: 'nginx:1.31.0' },
+                HostConfig: {},
+                NetworkSettings: { Networks: {} },
+            } as any;
+
+            const newImageSpec = {
+                RepoTags: ['docker.io/library/nginx:1.31.2'],
+                Config: {},
+            } as any;
+
+            const clone = docker.cloneContainer(
+                base,
+                'nginx:1.31.2',
+                undefined,
+                newImageSpec,
+            );
+            expect(clone.Image).toEqual('docker.io/library/nginx:1.31.2');
+        });
+    });
+
+    describe('createContainer with Docker 29 containerd store', () => {
+        test('should ensure Image is fully qualified when sent to dockerApi.createContainer (#1081)', async () => {
+            let capturedOptions: any;
+            const mockDockerApi = {
+                createContainer: jest.fn((opts) => {
+                    capturedOptions = opts;
+                    return Promise.resolve({ id: 'new-container-id' });
+                }),
+            };
+
+            await docker.createContainer(
+                mockDockerApi as any,
+                {
+                    name: 'local_nginx',
+                    Image: 'nginx:1.31.2',
+                },
+                'local_nginx',
+                log,
+            );
+
+            expect(mockDockerApi.createContainer).toHaveBeenCalledTimes(1);
+            expect(capturedOptions.Image).toEqual(
+                'docker.io/library/nginx:1.31.2',
+            );
+        });
+    });
+
+    describe('inspectImage fallback on Docker 29', () => {
+        test('should fall back to fully qualified ref when unqualified ref fails with not found (#1081)', async () => {
+            const mockInspect = {
+                Id: 'sha256:pulled123',
+                RepoTags: ['docker.io/library/nginx:1.31.2'],
+            };
+            const mockDockerApi = {
+                getImage: jest.fn((ref) => {
+                    if (ref === 'nginx:1.31.2') {
+                        return {
+                            inspect: jest.fn(() =>
+                                Promise.reject(
+                                    new Error(
+                                        '(HTTP code 404) no such image: nginx:1.31.2',
+                                    ),
+                                ),
+                            ),
+                        };
+                    }
+                    if (ref === 'docker.io/library/nginx:1.31.2') {
+                        return {
+                            inspect: jest.fn(() =>
+                                Promise.resolve(mockInspect),
+                            ),
+                        };
+                    }
+                    return {
+                        inspect: jest.fn(() =>
+                            Promise.reject(new Error('not found')),
+                        ),
+                    };
+                }),
+            };
+
+            const result = await docker.inspectImage(
+                mockDockerApi as any,
+                'nginx:1.31.2',
+                log,
+            );
+
+            expect(result).toEqual(mockInspect);
+            expect(mockDockerApi.getImage).toHaveBeenCalledWith('nginx:1.31.2');
+            expect(mockDockerApi.getImage).toHaveBeenCalledWith(
+                'docker.io/library/nginx:1.31.2',
+            );
+        });
     });
 });

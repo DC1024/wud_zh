@@ -45,10 +45,28 @@ import {
     resolveRegistry,
     isRegistryRegistered,
 } from '../../../registries/registryProvider';
+import {
+    resolveCandidateTag,
+    isNonContainerArtifactError,
+} from '../../../registries/Registry';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
-import Watcher from '../../Watcher';
+import Watcher, { ReconcileOptions, ContainerReport } from '../../Watcher';
 import { ComponentConfiguration } from '../../../registry/Component';
 import { Logger } from 'pino';
+
+export interface DockerEventsRetryState {
+    reconnectTimer?: NodeJS.Timeout;
+    reconnectAttempts: number;
+    isConnecting: boolean;
+    isDeregistered: boolean;
+    activeStream?: NodeJS.ReadableStream;
+}
+
+// Config constants
+export const EVENTS_INITIAL_BACKOFF_MS = 1000;
+export const EVENTS_MAX_BACKOFF_MS = 60000;
+export const EVENTS_BACKOFF_FACTOR = 2;
+export const EVENTS_JITTER_MS = 1000;
 
 export interface DockerWatcherConfiguration extends ComponentConfiguration {
     socket: string;
@@ -90,13 +108,88 @@ export interface DiscoveredContainer {
 const START_WATCHER_DELAY_MS = 1000;
 
 // Debounce delay used when performing a watch after a docker event has been received
-const DEBOUNCED_WATCH_CRON_MS = 5000;
+const DEBOUNCED_WATCH_CRON_MS = 10000;
 
 /**
  * Return all supported registries
  */
 function getRegistries() {
     return registry.getState().registry;
+}
+
+/**
+ * Format error message with details for logging and error reporting.
+ */
+export function formatErrorMessage(e: any): string {
+    if (!e) {
+        return 'Unknown error';
+    }
+    if (typeof e === 'string') {
+        return e.trim() || 'Unknown error';
+    }
+    // Dockerode / docker-modem error
+    if (
+        e.json &&
+        typeof e.json.message === 'string' &&
+        e.json.message.trim() !== ''
+    ) {
+        return e.json.message.trim();
+    }
+    if (e.reason && typeof e.reason === 'string' && e.reason.trim() !== '') {
+        return e.statusCode
+            ? `(${e.statusCode}) ${e.reason.trim()}`
+            : e.reason.trim();
+    }
+    // Axios / HTTP response errors with registry body
+    if (e.response?.data) {
+        const data = e.response.data;
+        if (typeof data === 'string' && data.trim() !== '') {
+            return e.message ? `${e.message}: ${data.trim()}` : data.trim();
+        }
+        if (typeof data.message === 'string' && data.message.trim() !== '') {
+            return e.message
+                ? `${e.message}: ${data.message.trim()}`
+                : data.message.trim();
+        }
+        if (Array.isArray(data.errors) && data.errors.length > 0) {
+            const errDetails = data.errors
+                .map(
+                    (err: any) =>
+                        err.message || err.code || JSON.stringify(err),
+                )
+                .filter(Boolean)
+                .join(', ');
+            if (errDetails) {
+                return e.message ? `${e.message}: ${errDetails}` : errDetails;
+            }
+        }
+    }
+    // Error object message (avoid generic 'Error' or empty string)
+    if (
+        typeof e.message === 'string' &&
+        e.message.trim() !== '' &&
+        e.message.trim() !== 'Error'
+    ) {
+        return e.message.trim();
+    }
+    if (e.code && typeof e.code === 'string') {
+        return `Error ${e.code}`;
+    }
+    if (e.name && typeof e.name === 'string' && e.name !== 'Error') {
+        return e.name;
+    }
+    if (typeof e.toString === 'function') {
+        const str = e.toString();
+        if (
+            str &&
+            str !== '[object Object]' &&
+            str !== 'Error' &&
+            str !== 'Error: Error'
+        ) {
+            return str;
+        }
+    }
+    return 'Unknown error';
 }
 
 /**
@@ -107,16 +200,28 @@ export function getTagCandidates(
     tags: string[],
     logContainer: any,
 ) {
-    let filteredTags = tags;
+    let filteredTags = (tags || []).filter(
+        (tag) => typeof tag === 'string' && tag.trim() !== '',
+    );
 
     // Match include tag regex
     if (container.includeTags) {
-        const includePattern = interpolateTagFilter(
-            container.includeTags,
-            container,
-        );
-        const includeTagsRegex = new RegExp(includePattern);
-        filteredTags = filteredTags.filter((tag) => includeTagsRegex.test(tag));
+        try {
+            const includePattern = interpolateTagFilter(
+                container.includeTags,
+                container,
+            );
+            const includeTagsRegex = new RegExp(includePattern);
+            filteredTags = filteredTags.filter((tag) =>
+                includeTagsRegex.test(tag),
+            );
+        } catch (e: any) {
+            if (logContainer && typeof logContainer.warn === 'function') {
+                logContainer.warn(
+                    `Invalid includeTags regex (${container.includeTags}): ${e.message}`,
+                );
+            }
+        }
     } else {
         // If no includeTags, filter out tags starting with "sha"
         filteredTags = filteredTags.filter((tag) => !tag.startsWith('sha'));
@@ -124,14 +229,22 @@ export function getTagCandidates(
 
     // Match exclude tag regex
     if (container.excludeTags) {
-        const excludePattern = interpolateTagFilter(
-            container.excludeTags,
-            container,
-        );
-        const excludeTagsRegex = new RegExp(excludePattern);
-        filteredTags = filteredTags.filter(
-            (tag) => !excludeTagsRegex.test(tag),
-        );
+        try {
+            const excludePattern = interpolateTagFilter(
+                container.excludeTags,
+                container,
+            );
+            const excludeTagsRegex = new RegExp(excludePattern);
+            filteredTags = filteredTags.filter(
+                (tag) => !excludeTagsRegex.test(tag),
+            );
+        } catch (e: any) {
+            if (logContainer && typeof logContainer.warn === 'function') {
+                logContainer.warn(
+                    `Invalid excludeTags regex (${container.excludeTags}): ${e.message}`,
+                );
+            }
+        }
     }
 
     // Always filter out tags ending with ".sig"
@@ -196,11 +309,17 @@ export function getTagCandidates(
         }
 
         // Keep semver only
-        filteredTags = filteredTags.filter(
-            (tag) =>
-                parseSemver(transformTag(container.transformTags, tag)) !==
-                null,
-        );
+        filteredTags = filteredTags.filter((tag) => {
+            try {
+                return (
+                    parseSemver(
+                        transformTag(container.transformTags, tag, container),
+                    ) !== null
+                );
+            } catch {
+                return false;
+            }
+        });
 
         // Keep only tags with the same number of numeric segments
         if (currentComponents.version) {
@@ -218,24 +337,42 @@ export function getTagCandidates(
         // same version as the current one (for example a rebuild suffix stripped
         // by the transform formula) is not an upgrade and must be excluded.
         filteredTags = filteredTags.filter((tag) => {
-            const tagTransformed = transformTag(container.transformTags, tag);
-            const currentTransformed = transformTag(
-                container.transformTags,
-                container.image.tag.value,
-            );
-            return (
-                tagTransformed !== currentTransformed &&
-                isGreaterSemver(tagTransformed, currentTransformed)
-            );
+            try {
+                const tagTransformed = transformTag(
+                    container.transformTags,
+                    tag,
+                    container,
+                );
+                const currentTransformed = transformTag(
+                    container.transformTags,
+                    container.image.tag.value,
+                    container,
+                );
+                return (
+                    tagTransformed !== currentTransformed &&
+                    isGreaterSemver(tagTransformed, currentTransformed)
+                );
+            } catch (e: any) {
+                if (logContainer && typeof logContainer.debug === 'function') {
+                    logContainer.debug(
+                        `Error comparing semver tag ${tag}: ${e.message}`,
+                    );
+                }
+                return false;
+            }
         });
 
         // Apply semver sort desc
         filteredTags.sort((t1, t2) => {
-            const greater = isGreaterSemver(
-                transformTag(container.transformTags, t2),
-                transformTag(container.transformTags, t1),
-            );
-            return greater ? 1 : -1;
+            try {
+                const greater = isGreaterSemver(
+                    transformTag(container.transformTags, t2, container),
+                    transformTag(container.transformTags, t1, container),
+                );
+                return greater ? 1 : -1;
+            } catch {
+                return 0;
+            }
         });
     } else {
         // Non semver tag -> do not propose any other registry tag
@@ -313,16 +450,42 @@ export function getContainerName(container: any) {
 /**
  * Get image repo digest.
  */
-function getRepoDigest(containerImage: any) {
+export function getRepoDigest(containerImage: any): string | undefined {
     if (
-        !containerImage.RepoDigests ||
-        containerImage.RepoDigests.length === 0
+        containerImage?.RepoDigests &&
+        Array.isArray(containerImage.RepoDigests) &&
+        containerImage.RepoDigests.length > 0
     ) {
-        return undefined;
+        for (const fullDigest of containerImage.RepoDigests) {
+            if (typeof fullDigest === 'string') {
+                if (fullDigest.includes('@')) {
+                    const digest = fullDigest.split('@')[1];
+                    if (digest) {
+                        if (digest.startsWith('sha256:')) {
+                            return digest;
+                        }
+                        if (/^[a-f0-9]{64}$/i.test(digest)) {
+                            return `sha256:${digest}`;
+                        }
+                    }
+                } else if (fullDigest.startsWith('sha256:')) {
+                    return fullDigest;
+                } else if (/^[a-f0-9]{64}$/i.test(fullDigest)) {
+                    return `sha256:${fullDigest}`;
+                }
+            }
+        }
     }
-    const fullDigest = containerImage.RepoDigests[0];
-    const digestSplit = fullDigest.split('@');
-    return digestSplit[1];
+    // Podman inspect provides Digest at image top level
+    if (containerImage?.Digest && typeof containerImage.Digest === 'string') {
+        if (containerImage.Digest.startsWith('sha256:')) {
+            return containerImage.Digest;
+        }
+        if (/^[a-f0-9]{64}$/i.test(containerImage.Digest)) {
+            return `sha256:${containerImage.Digest}`;
+        }
+    }
+    return undefined;
 }
 
 export const ROLLBACK_ARCHIVE_REGEX = /-wud-old-\d+$/;
@@ -455,6 +618,11 @@ export class Docker extends Watcher {
     public watchCronDebounced: any;
     public listenDockerEventsTimeout: any;
     public dockerEventsStream: any;
+    public eventsReconnectTimer?: NodeJS.Timeout;
+    public eventsReconnectAttempts = 0;
+    public isConnectingEvents = false;
+    public isDeregistered = false;
+    private isWatching = false;
 
     getConfigurationSchema() {
         return joi.object().keys({
@@ -554,6 +722,7 @@ export class Docker extends Watcher {
      * Deregister the component.
      */
     async deregisterComponent() {
+        this.isDeregistered = true;
         if (this.watchCron) {
             this.watchCron.stop();
             delete this.watchCron;
@@ -565,6 +734,21 @@ export class Docker extends Watcher {
             clearTimeout(this.listenDockerEventsTimeout);
             delete this.watchCronDebounced;
         }
+        if (this.eventsReconnectTimer) {
+            clearTimeout(this.eventsReconnectTimer);
+            this.eventsReconnectTimer = undefined;
+        }
+        if (this.dockerEventsStream) {
+            try {
+                this.dockerEventsStream.removeAllListeners();
+                if (typeof this.dockerEventsStream.destroy === 'function') {
+                    this.dockerEventsStream.destroy();
+                }
+            } catch {
+                // ignore
+            }
+            this.dockerEventsStream = undefined;
+        }
     }
 
     /**
@@ -574,6 +758,30 @@ export class Docker extends Watcher {
         if (!this.log || typeof this.log.info !== 'function') {
             return;
         }
+        if (this.isDeregistered) {
+            return;
+        }
+
+        // Clear any pending reconnect timer
+        if (this.eventsReconnectTimer) {
+            clearTimeout(this.eventsReconnectTimer);
+            this.eventsReconnectTimer = undefined;
+        }
+
+        // Clean up previous stream if still present
+        if (this.dockerEventsStream) {
+            try {
+                this.dockerEventsStream.removeAllListeners();
+                if (typeof this.dockerEventsStream.destroy === 'function') {
+                    this.dockerEventsStream.destroy();
+                }
+            } catch {
+                // ignore
+            }
+            this.dockerEventsStream = undefined;
+        }
+
+        this.isConnectingEvents = true;
         this.log.info('Listening to docker events');
         const options: Dockerode.GetEventsOptions = {
             filters: {
@@ -591,15 +799,39 @@ export class Docker extends Watcher {
                 ],
             },
         };
-        this.dockerApi.getEvents(options, (err, stream) => {
-            if (err) {
-                if (this.log && typeof this.log.warn === 'function') {
-                    this.log.warn(
-                        `Unable to listen to Docker events [${err.message}]`,
-                    );
-                    this.log.debug(err);
+
+        try {
+            this.dockerApi.getEvents(options, (err, stream) => {
+                this.isConnectingEvents = false;
+                if (this.isDeregistered) {
+                    if (
+                        stream &&
+                        typeof (stream as any).destroy === 'function'
+                    ) {
+                        (stream as any).destroy();
+                    }
+                    return;
                 }
-            } else {
+                if (err) {
+                    if (this.log && typeof this.log.warn === 'function') {
+                        this.log.warn(
+                            `Unable to listen to Docker events [${err.message}]`,
+                        );
+                        this.log.debug(err);
+                    }
+                    this.scheduleEventsReconnect();
+                    return;
+                }
+
+                if (!stream) {
+                    this.scheduleEventsReconnect();
+                    return;
+                }
+
+                // Successful connection: reset reconnect attempts
+                this.eventsReconnectAttempts = 0;
+                this.dockerEventsStream = stream;
+
                 let chunks: Buffer[] = [];
                 const collectChunks = (chunk: Buffer) => {
                     chunks.push(chunk);
@@ -609,9 +841,222 @@ export class Docker extends Watcher {
                         chunks = [];
                     }
                 };
+
                 stream.on('data', collectChunks);
+
+                const onTerminated = (reason: string, streamErr?: any) => {
+                    this.handleEventsStreamTerminated(reason, streamErr);
+                };
+
+                stream.once('error', (streamErr) =>
+                    onTerminated('error', streamErr),
+                );
+                stream.once('end', () => onTerminated('end'));
+                stream.once('close', () => onTerminated('close'));
+            });
+        } catch (e: any) {
+            this.isConnectingEvents = false;
+            if (this.log && typeof this.log.warn === 'function') {
+                this.log.warn(
+                    `Failed to initiate Docker events stream [${e.message}]`,
+                );
             }
-        });
+            this.scheduleEventsReconnect();
+        }
+    }
+
+    /**
+     * Handle Docker events stream termination and trigger reconnection backoff.
+     */
+    handleEventsStreamTerminated(reason: string, err?: any) {
+        if (this.isDeregistered) {
+            return;
+        }
+        if (this.log && typeof this.log.warn === 'function') {
+            const detail = err ? ` [${err.message || err}]` : '';
+            this.log.warn(
+                `Docker events stream terminated (${reason})${detail}`,
+            );
+            if (err && typeof this.log.debug === 'function') {
+                this.log.debug(err);
+            }
+        }
+        if (this.dockerEventsStream) {
+            try {
+                this.dockerEventsStream.removeAllListeners();
+                if (typeof this.dockerEventsStream.destroy === 'function') {
+                    this.dockerEventsStream.destroy();
+                }
+            } catch {
+                // ignore
+            }
+            this.dockerEventsStream = undefined;
+        }
+        this.scheduleEventsReconnect();
+    }
+
+    /**
+     * Schedule a reconnection attempt for Docker events stream using exponential backoff and jitter.
+     */
+    scheduleEventsReconnect() {
+        if (this.isDeregistered) {
+            return;
+        }
+        if (this.eventsReconnectTimer) {
+            return;
+        }
+        const delay =
+            Math.min(
+                EVENTS_INITIAL_BACKOFF_MS *
+                    Math.pow(
+                        EVENTS_BACKOFF_FACTOR,
+                        this.eventsReconnectAttempts,
+                    ),
+                EVENTS_MAX_BACKOFF_MS,
+            ) +
+            Math.random() * EVENTS_JITTER_MS;
+
+        this.eventsReconnectAttempts++;
+        if (this.log && typeof this.log.info === 'function') {
+            this.log.info(
+                `Scheduling Docker events reconnect attempt ${this.eventsReconnectAttempts} in ${Math.round(delay)}ms`,
+            );
+        }
+        this.eventsReconnectTimer = setTimeout(() => {
+            this.eventsReconnectTimer = undefined;
+            this.listenDockerEvents();
+        }, delay);
+    }
+
+    /**
+     * Remove a deleted or superseded container from the state store and emit removal events.
+     */
+    async pruneContainerFromStore(containerId: string): Promise<void> {
+        const found = storeContainer.getContainer(containerId);
+        if (found) {
+            storeContainer.deleteContainer(containerId);
+        }
+    }
+
+    /**
+     * Reconcile a single container by ID without triggering a full engine sweep.
+     * @param containerId The current/new container ID
+     * @param options Reconcile options including superseded oldContainerId
+     */
+    async reconcileContainer(
+        containerId: string,
+        options?: ReconcileOptions,
+    ): Promise<ContainerReport | undefined> {
+        const previous =
+            this.containerChecks.get(containerId) ?? Promise.resolve();
+
+        const runReconcile = async (): Promise<ContainerReport | undefined> => {
+            if (
+                options?.oldContainerId &&
+                options.oldContainerId !== containerId
+            ) {
+                await this.pruneContainerFromStore(options.oldContainerId);
+            }
+
+            let containerInspect: Dockerode.ContainerInspectInfo;
+            try {
+                containerInspect = await this.dockerApi
+                    .getContainer(containerId)
+                    .inspect();
+            } catch (e: any) {
+                this.log.debug(
+                    `Unable to inspect container id=[${containerId}] during reconcile: ${e.message}`,
+                );
+                await this.pruneContainerFromStore(containerId);
+                return undefined;
+            }
+
+            const containerLabels =
+                containerInspect.Config?.Labels ||
+                (containerInspect as any).Labels ||
+                {};
+            const containerName = getContainerName(containerInspect);
+
+            if (
+                containerName &&
+                (ROLLBACK_ARCHIVE_REGEX.test(containerName) ||
+                    containerName === 'wud-self-update')
+            ) {
+                await this.pruneContainerFromStore(containerId);
+                return undefined;
+            }
+
+            const toWatch = isContainerToWatch(
+                containerLabels[wudWatch] || containerLabels['wud.watch'],
+                this.configuration.watchbydefault,
+                containerName,
+                containerLabels,
+                this.configuration.exclude,
+                this.configuration.include,
+                this.log,
+            );
+
+            if (!toWatch) {
+                await this.pruneContainerFromStore(containerId);
+                return undefined;
+            }
+
+            let containerWithImage: Container | undefined;
+            try {
+                const imageDetail = await this.addImageDetailsToContainer(
+                    containerInspect,
+                    containerLabels[wudTagInclude],
+                    containerLabels[wudTagExclude],
+                    containerLabels[wudTagTransform],
+                    containerLabels[wudLinkTemplate],
+                    containerLabels[wudDisplayName],
+                    containerLabels[wudDisplayIcon],
+                    containerLabels[wudTriggerInclude],
+                    containerLabels[wudTriggerExclude],
+                    { forceRefresh: options?.forceRefresh ?? true },
+                );
+                containerWithImage = imageDetail || undefined;
+            } catch (e: any) {
+                const errorDetail = formatErrorMessage(e);
+                this.log.warn(
+                    `Failed to fetch image detail for container ${containerName} (${containerId}) during reconcile: ${errorDetail}`,
+                );
+                return undefined;
+            }
+
+            if (!containerWithImage) {
+                return undefined;
+            }
+
+            const containerReport =
+                await this.checkContainer(containerWithImage);
+
+            const containerGauge = getWatchContainerGauge();
+            if (containerGauge) {
+                const storeCount = storeContainer.getContainers({
+                    watcher: this.name,
+                }).length;
+                containerGauge.set(
+                    {
+                        type: this.type,
+                        name: this.name,
+                    },
+                    storeCount,
+                );
+            }
+
+            return containerReport;
+        };
+
+        const check = previous.catch(() => undefined).then(runReconcile);
+        this.containerChecks.set(containerId, check);
+        try {
+            return await check;
+        } finally {
+            if (this.containerChecks.get(containerId) === check) {
+                this.containerChecks.delete(containerId);
+            }
+        }
     }
 
     /**
@@ -633,14 +1078,29 @@ export class Docker extends Watcher {
             ? dockerEvent.Actor.Attributes.name.replace(/\//, '')
             : undefined;
 
-        // Rollback archive containers should never be processed or indexed
-        if (eventName && ROLLBACK_ARCHIVE_REGEX.test(eventName)) {
+        // Rollback archive containers and self-update helper should never be processed or indexed
+        if (
+            eventName &&
+            (ROLLBACK_ARCHIVE_REGEX.test(eventName) ||
+                eventName === 'wud-self-update')
+        ) {
             return;
         }
 
-        // If the container was created or destroyed => perform a watch
-        if (action === 'destroy' || action === 'create') {
-            await this.watchCronDebounced();
+        const eventLabels = dockerEvent.Actor?.Attributes || {};
+        const wudWatchAttr = eventLabels[wudWatch] || eventLabels['wud.watch'];
+        if (
+            wudWatchAttr !== undefined &&
+            wudWatchAttr.toLowerCase() === 'false'
+        ) {
+            return;
+        }
+
+        // Targeted single-container reactions
+        if (action === 'destroy') {
+            await this.pruneContainerFromStore(containerId);
+        } else if (action === 'start') {
+            await this.reconcileContainer(containerId);
         } else {
             // Update container state in db if so
             try {
@@ -737,29 +1197,39 @@ export class Docker extends Watcher {
         if (!this.log || typeof this.log.info !== 'function') {
             return [];
         }
-        this.log.info(`Cron started (${this.configuration.cron})`);
-
-        // Get container reports
-        const containerReports = await this.watch();
-
-        // Count container reports
-        const containerReportsCount = containerReports.length;
-
-        // Count container available updates
-        const containerUpdatesCount = containerReports.filter(
-            (containerReport) => containerReport.container.updateAvailable,
-        ).length;
-
-        // Count container errors
-        const containerErrorsCount = containerReports.filter(
-            (containerReport) => containerReport.container.error !== undefined,
-        ).length;
-
-        const stats = `${containerReportsCount} containers watched, ${containerErrorsCount} errors, ${containerUpdatesCount} available updates`;
-        if (this.log && typeof this.log.info === 'function') {
-            this.log.info(`Cron finished (${stats})`);
+        if (this.isWatching) {
+            this.log.info('Watcher is already watching => skip watchFromCron');
+            return [];
         }
-        return containerReports;
+        this.isWatching = true;
+        try {
+            this.log.info(`Cron started (${this.configuration.cron})`);
+
+            // Get container reports
+            const containerReports = await this.watch();
+
+            // Count container reports
+            const containerReportsCount = containerReports.length;
+
+            // Count container available updates
+            const containerUpdatesCount = containerReports.filter(
+                (containerReport) => containerReport.container.updateAvailable,
+            ).length;
+
+            // Count container errors
+            const containerErrorsCount = containerReports.filter(
+                (containerReport) =>
+                    containerReport.container.error !== undefined,
+            ).length;
+
+            const stats = `${containerReportsCount} containers watched, ${containerErrorsCount} errors, ${containerUpdatesCount} available updates`;
+            if (this.log && typeof this.log.info === 'function') {
+                this.log.info(`Cron finished (${stats})`);
+            }
+            return containerReports;
+        } finally {
+            this.isWatching = false;
+        }
     }
 
     /**
@@ -775,9 +1245,13 @@ export class Docker extends Watcher {
         try {
             containers = await this.getContainers();
         } catch (e: any) {
+            const errorMessage = formatErrorMessage(e);
             this.log.warn(
-                `Error when trying to get the list of the containers to watch (${e.message})`,
+                `Error when trying to get the list of the containers to watch (${errorMessage})`,
             );
+            if (this.log && typeof this.log.debug === 'function') {
+                this.log.debug(e);
+            }
         }
         try {
             const containerReports =
@@ -785,9 +1259,13 @@ export class Docker extends Watcher {
             event.emitContainerReports(containerReports);
             return containerReports;
         } catch (e: any) {
+            const errorMessage = formatErrorMessage(e);
             this.log.warn(
-                `Error when processing some containers (${e.message})`,
+                `Error when processing some containers (${errorMessage})`,
             );
+            if (this.log && typeof this.log.debug === 'function') {
+                this.log.debug(e);
+            }
             return [];
         } finally {
             // Dispatch event to notify stop watching
@@ -798,14 +1276,16 @@ export class Docker extends Watcher {
     /**
      * Watch a Container.
      */
-    async watchContainer(container: Container) {
+    protected async checkContainer(container: Container) {
         // Child logger for the container to process
         const logContainer = this.log.child({ container: fullName(container) });
         const containerWithResult = container;
 
         // Reset previous error if so
         delete containerWithResult.error;
-        logContainer.debug('Start watching');
+        if (logContainer && typeof logContainer.debug === 'function') {
+            logContainer.debug('Start watching');
+        }
 
         try {
             containerWithResult.result = await this.findNewVersion(
@@ -813,17 +1293,37 @@ export class Docker extends Watcher {
                 logContainer,
             );
         } catch (e: any) {
-            logContainer.warn(`Error when processing (${e.message})`);
-            logContainer.debug(e);
+            const errorMessage = formatErrorMessage(e);
+            logContainer.warn(`Error when processing (${errorMessage})`);
+            if (logContainer && typeof logContainer.debug === 'function') {
+                logContainer.debug(e);
+            }
             containerWithResult.error = {
-                message: e.message,
+                message: errorMessage,
             };
         }
 
-        const containerReport =
-            this.mapContainerToContainerReport(containerWithResult);
-        event.emitContainerReport(containerReport);
-        return containerReport;
+        try {
+            const containerReport =
+                this.mapContainerToContainerReport(containerWithResult);
+            event.emitContainerReport(containerReport);
+            return containerReport;
+        } catch (e: any) {
+            const errorMessage = formatErrorMessage(e);
+            logContainer.warn(
+                `Error when saving container report (${errorMessage})`,
+            );
+            if (logContainer && typeof logContainer.debug === 'function') {
+                logContainer.debug(e);
+            }
+            containerWithResult.error = {
+                message: errorMessage,
+            };
+            return {
+                container: containerWithResult,
+                changed: false,
+            };
+        }
     }
 
     /**
@@ -841,7 +1341,7 @@ export class Docker extends Watcher {
         // Filter on containers to watch
         // (preferences are read once per scan, then looked up in memory)
         const watchPreferences = storeWatchPreference.getWatchedMap(this.name);
-        const filteredContainers = containers.filter((container) =>
+        const filteredContainers = (containers || []).filter((container) =>
             isContainerToWatch(
                 container.Labels ? container.Labels[wudWatch] : undefined,
                 this.configuration.watchbydefault,
@@ -853,24 +1353,32 @@ export class Docker extends Watcher {
                 watchPreferences.get(getContainerName(container)),
             ),
         );
-        const containerPromises = filteredContainers.map((container) =>
-            this.addImageDetailsToContainer(
+        const containerPromises = filteredContainers.map((container) => {
+            const containerLabels =
+                container.Labels || (container as any).labels || {};
+            return this.addImageDetailsToContainer(
                 container,
-                container.Labels[wudTagInclude],
-                container.Labels[wudTagExclude],
-                container.Labels[wudTagTransform],
-                container.Labels[wudLinkTemplate],
-                container.Labels[wudDisplayName],
-                container.Labels[wudDisplayIcon],
-                container.Labels[wudTriggerInclude],
-                container.Labels[wudTriggerExclude],
+                containerLabels[wudTagInclude],
+                containerLabels[wudTagExclude],
+                containerLabels[wudTagTransform],
+                containerLabels[wudLinkTemplate],
+                containerLabels[wudDisplayName],
+                containerLabels[wudDisplayIcon],
+                containerLabels[wudTriggerInclude],
+                containerLabels[wudTriggerExclude],
             ).catch((e) => {
+                const containerName =
+                    this.getContainerName(container) || container.Id;
+                const errorDetail = formatErrorMessage(e);
                 this.log.warn(
-                    `Failed to fetch image detail for container ${container.Id}: ${e.message} - ${e.stack}`,
+                    `Failed to fetch image detail for container ${containerName} (${container.Id}): ${errorDetail}`,
                 );
+                if (this.log && typeof this.log.debug === 'function') {
+                    this.log.debug(e);
+                }
                 return e;
-            }),
-        );
+            });
+        });
         const containersWithImage = (
             await Promise.all(containerPromises)
         ).filter((result) => !(result instanceof Error));
@@ -889,9 +1397,13 @@ export class Docker extends Watcher {
                 });
                 pruneOldContainers(containersToReturn, containersFromTheStore);
             } catch (e: any) {
+                const errorDetail = formatErrorMessage(e);
                 this.log.warn(
-                    `Error when trying to prune the old containers (${e.message})`,
+                    `Error when trying to prune the old containers (${errorDetail})`,
                 );
+                if (this.log && typeof this.log.debug === 'function') {
+                    this.log.debug(e);
+                }
             }
         }
         this.updatePrometheusGauge(containersToReturn);
@@ -920,7 +1432,8 @@ export class Docker extends Watcher {
      * it is cheap enough to be called from a UI on demand.
      */
     async discoverContainers(): Promise<DiscoveredContainer[]> {
-        const containers = await this.dockerApi.listContainers({ all: true });
+        const containers =
+            (await this.dockerApi.listContainers({ all: true })) || [];
         const watchPreferences = storeWatchPreference.getWatchedMap(this.name);
 
         return containers.map((container) => {
@@ -990,10 +1503,28 @@ export class Docker extends Watcher {
             }
 
             // Get all available tags for semver update checks
-            const tags =
-                container.image.tag.semver || container.includeTags
-                    ? await registryProvider.getTags(container.image)
-                    : [];
+            let tags: string[] = [];
+            if (container.image.tag.semver || container.includeTags) {
+                try {
+                    tags = await registryProvider.getTags(container.image);
+                } catch (e: any) {
+                    const errorDetail = formatErrorMessage(e);
+                    logContainer.warn(
+                        `Failed to fetch tags for image ${container.image.name} from registry ${container.image.registry.name} (${errorDetail})`,
+                    );
+                    if (
+                        logContainer &&
+                        typeof logContainer.debug === 'function'
+                    ) {
+                        logContainer.debug(e);
+                    }
+                    if (!watchDigest) {
+                        throw new Error(
+                            `Failed to fetch tags from registry (${errorDetail})`,
+                        );
+                    }
+                }
+            }
 
             // Get candidate tags (based on tag name)
             const tagsCandidates = getTagCandidates(
@@ -1002,8 +1533,39 @@ export class Docker extends Watcher {
                 logContainer,
             );
 
+            let candidateTag: string | undefined;
+            let candidateRemoteDigest: any;
+            if (tagsCandidates.length > 0) {
+                try {
+                    const resolution = await resolveCandidateTag(
+                        registryProvider,
+                        container.image,
+                        tagsCandidates,
+                        logContainer,
+                    );
+                    candidateTag = resolution.tag;
+                    candidateRemoteDigest = resolution.remoteDigest;
+                } catch (e: any) {
+                    const errorDetail = formatErrorMessage(e);
+                    logContainer.warn(
+                        `Failed to resolve candidate tags for image ${container.image.name} (${errorDetail})`,
+                    );
+                    if (
+                        logContainer &&
+                        typeof logContainer.debug === 'function'
+                    ) {
+                        logContainer.debug(e);
+                    }
+                    if (!watchDigest) {
+                        throw new Error(
+                            `Failed to resolve candidate tags (${errorDetail})`,
+                        );
+                    }
+                }
+            }
+
             // Must watch digest? => Find local/remote digests on registry
-            if (watchDigest && container.image.digest.repo) {
+            if (watchDigest && container.image.digest?.repo) {
                 // If we have a tag candidate BUT we also watch digest
                 // (case where local=`mongo:8` and remote=`mongo:8.0.0`),
                 // Then get the digest of the tag candidate
@@ -1011,38 +1573,99 @@ export class Docker extends Watcher {
                 const imageToGetDigestFrom = JSON.parse(
                     JSON.stringify(container.image),
                 );
-                if (tagsCandidates.length > 0) {
-                    [imageToGetDigestFrom.tag.value] = tagsCandidates;
+                if (candidateTag) {
+                    imageToGetDigestFrom.tag.value = candidateTag;
                 }
 
-                const remoteDigest =
-                    await registryProvider.getImageManifestDigest(
-                        imageToGetDigestFrom,
-                    );
-
-                result.digest = remoteDigest.digest;
-                result.created = remoteDigest.created;
-
-                if (remoteDigest.version === 2) {
-                    // Regular v2 manifest => Get manifest digest
-
-                    const digestV2 =
-                        await registryProvider.getImageManifestDigest(
-                            imageToGetDigestFrom,
-                            container.image.digest.repo,
+                let remoteDigest = candidateRemoteDigest;
+                if (!remoteDigest) {
+                    try {
+                        remoteDigest =
+                            await registryProvider.getImageManifestDigest(
+                                imageToGetDigestFrom,
+                            );
+                    } catch (e: any) {
+                        if (isNonContainerArtifactError(e)) {
+                            logContainer.warn(
+                                `Image ${imageToGetDigestFrom.name}:${imageToGetDigestFrom.tag.value} is a non-container OCI artifact`,
+                            );
+                            return result;
+                        }
+                        const errorDetail = formatErrorMessage(e);
+                        logContainer.warn(
+                            `Failed to fetch remote image manifest for ${imageToGetDigestFrom.name}:${imageToGetDigestFrom.tag.value} (${errorDetail})`,
                         );
-                    container.image.digest.value = digestV2.digest;
+                        if (
+                            logContainer &&
+                            typeof logContainer.debug === 'function'
+                        ) {
+                            logContainer.debug(e);
+                        }
+                        throw new Error(
+                            `Failed to fetch remote image manifest (${errorDetail})`,
+                        );
+                    }
+                }
+
+                if (remoteDigest?.digest) {
+                    result.digest = remoteDigest.digest;
+                    result.created = remoteDigest.created;
+                }
+
+                if (remoteDigest?.version !== 1) {
+                    // Regular v2 manifest => Get manifest digest
+                    try {
+                        const digestV2 =
+                            await registryProvider.getImageManifestDigest(
+                                imageToGetDigestFrom,
+                                container.image.digest.repo,
+                            );
+                        container.image.digest.value =
+                            digestV2?.digest || container.image.digest.repo;
+                    } catch (e: any) {
+                        const errorDetail = formatErrorMessage(e);
+                        if (
+                            logContainer &&
+                            typeof logContainer.debug === 'function'
+                        ) {
+                            logContainer.debug(
+                                `Unable to resolve manifest digest for local repo digest ${container.image.digest.repo} (${errorDetail}), falling back to repo digest`,
+                            );
+                        }
+                        container.image.digest.value =
+                            container.image.digest.repo;
+                    }
                 } else {
                     // Legacy v1 image => take Image digest as reference for comparison.
                     // Config.Image is empty on most modern images (deprecated since
                     // Docker moved to content-addressable image storage), so fall back
                     // to the local image Id, which is the config digest Docker itself
                     // uses to identify this image.
-                    const image = await this.dockerApi
-                        .getImage(container.image.id)
-                        .inspect();
-                    container.image.digest.value =
-                        image.Config.Image || image.Id;
+                    try {
+                        const image = await this.dockerApi
+                            .getImage(container.image.id)
+                            .inspect();
+                        const rawId = image.Config?.Image || image.Id;
+                        container.image.digest.value =
+                            rawId && /^[a-f0-9]{64}$/i.test(rawId)
+                                ? `sha256:${rawId}`
+                                : rawId;
+                    } catch (e: any) {
+                        const errorDetail = formatErrorMessage(e);
+                        if (
+                            logContainer &&
+                            typeof logContainer.debug === 'function'
+                        ) {
+                            logContainer.debug(
+                                `Cannot inspect local image ${container.image.id} (${errorDetail}), falling back to image id`,
+                            );
+                        }
+                        const rawId = container.image.id;
+                        container.image.digest.value =
+                            rawId && /^[a-f0-9]{64}$/i.test(rawId)
+                                ? `sha256:${rawId}`
+                                : rawId;
+                    }
                 }
 
                 // An update was found? Resolve what is actually IN it.
@@ -1050,7 +1673,7 @@ export class Docker extends Watcher {
                 // but the remote version label and build date both live in the
                 // image config blob.
                 if (
-                    remoteDigest.version === 2 &&
+                    remoteDigest?.version !== 1 &&
                     result.digest !== undefined &&
                     container.image.digest.value !== result.digest
                 ) {
@@ -1078,17 +1701,21 @@ export class Docker extends Watcher {
                                 remoteConfig.created ?? result.created;
                             result.version = remoteConfig.version;
                         } catch (e: any) {
-                            logContainer.debug(
-                                `Cannot get remote image config (${e.message})`,
-                            );
+                            if (
+                                logContainer &&
+                                typeof logContainer.debug === 'function'
+                            ) {
+                                logContainer.debug(
+                                    `Cannot get remote image config (${e.message})`,
+                                );
+                            }
                         }
                     }
                 }
             }
 
-            // The first one in the array is the highest
-            if (tagsCandidates && tagsCandidates.length > 0) {
-                [result.tag] = tagsCandidates;
+            if (candidateTag) {
+                result.tag = candidateTag;
             }
         }
         return result;
@@ -1106,17 +1733,20 @@ export class Docker extends Watcher {
      */
     async addImageDetailsToContainer(
         container: any,
-        includeTags: string,
-        excludeTags: string,
-        transformTags: string,
-        linkTemplate: string,
-        displayName: string,
-        displayIcon: string,
-        triggerInclude: string,
-        triggerExclude: string,
+        includeTags?: string,
+        excludeTags?: string,
+        transformTags?: string,
+        linkTemplate?: string,
+        displayName?: string,
+        displayIcon?: string,
+        triggerInclude?: string,
+        triggerExclude?: string,
+        options?: { forceRefresh?: boolean },
     ) {
-        const containerId = container.Id;
+        const containerId = container.Id || container.id;
         const containerLabels = container.Labels || container.labels || {};
+        const effectiveTransformTags =
+            transformTags ?? containerLabels[wudTagTransform];
         const stack =
             containerLabels[wudStack] ||
             containerLabels[dockerComposeProject] ||
@@ -1134,6 +1764,7 @@ export class Docker extends Watcher {
             ? undefined
             : storeContainer.getContainer(containerId);
         if (
+            !options?.forceRefresh &&
             containerInStore !== undefined &&
             containerInStore.error === undefined
         ) {
@@ -1270,26 +1901,56 @@ export class Docker extends Watcher {
                 `Container ${containerName} uses deprecated icon prefix '${displayIcon}'. Please migrate to 'selfhst:' (e.g. 'selfhst:${displayIcon.replace(/^hl[:-]/, '')}') or any standard Iconify format.`,
             );
         }
-        const status = container.State;
+        const status =
+            typeof container.State === 'object' && container.State !== null
+                ? container.State.Status || 'unknown'
+                : container.State;
         const architecture = image.Architecture;
         const os = image.Os;
         const variant = image.Variant;
         const created = image.Created;
-        const repoDigest = getRepoDigest(image);
         const imageId = image.Id;
 
         // Parse image to get registry, organization...
-        let imageNameToParse = container.Image;
-        if (imageNameToParse.includes('sha256:')) {
-            if (!image.RepoTags || image.RepoTags.length === 0) {
+        let imageNameToParse = container.Config?.Image || container.Image;
+        let pinnedDigest: string | undefined;
+
+        const rawNameToParse = (imageNameToParse || '').replace(/^sha256:/, '');
+        const rawImageId = (image.Id || '').replace(/^sha256:/, '');
+        const isImageId =
+            typeof imageNameToParse === 'string' &&
+            (imageNameToParse.startsWith('sha256:') ||
+                /^[a-f0-9]{64}$/i.test(imageNameToParse) ||
+                (rawImageId !== '' &&
+                    rawNameToParse.length >= 12 &&
+                    /^[a-f0-9]+$/i.test(rawNameToParse) &&
+                    rawImageId.startsWith(rawNameToParse)));
+
+        if (isImageId) {
+            const validRepoTags = (image.RepoTags || []).filter(
+                (tag: string) =>
+                    tag && tag !== '<none>:<none>' && !tag.endsWith(':<none>'),
+            );
+            if (validRepoTags.length === 0) {
                 this.log.warn(
                     `Cannot get a reliable tag for this image [${imageNameToParse}]`,
                 );
                 return Promise.resolve();
             }
             // Get the first repo tag (better than nothing ;)
-            [imageNameToParse] = image.RepoTags;
+            [imageNameToParse] = validRepoTags;
         }
+
+        if (imageNameToParse.includes('@')) {
+            const [imageRef, digest] = imageNameToParse.split('@');
+            imageNameToParse = imageRef;
+            if (digest && digest.includes(':')) {
+                pinnedDigest = digest;
+            }
+        }
+
+        const repoDigest = pinnedDigest || getRepoDigest(image);
+
         let parsedImage = parse(imageNameToParse);
         const tagName =
             parsedImage && parsedImage.tag ? parsedImage.tag : 'latest';
@@ -1312,9 +1973,11 @@ export class Docker extends Watcher {
                 `${container.Image} - ${parsedImage.domain} - No Registry Provider found`,
             );
         }
-        const parsedTag = parseSemver(transformTag(transformTags, tagName));
+        const parsedTag = parseSemver(
+            transformTag(effectiveTransformTags, tagName, containerName),
+        );
         const isSemver = parsedTag !== null && parsedTag !== undefined;
-        const watchDigestLabel = container.Labels[wudWatchDigest];
+        const watchDigestLabel = containerLabels[wudWatchDigest];
         let watchDigest = false;
 
         if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
@@ -1340,7 +2003,7 @@ export class Docker extends Watcher {
             delay,
             includeTags,
             excludeTags,
-            transformTags,
+            transformTags: effectiveTransformTags,
             linkTemplate,
             displayName,
             displayIcon,
@@ -1366,10 +2029,12 @@ export class Docker extends Watcher {
                 variant,
                 created,
             },
-            labels: container.Labels,
+            labels: containerLabels,
             snoozedVersion: containerInStore?.snoozedVersion,
             snoozedUntil: containerInStore?.snoozedUntil,
-            result: containerInStore?.result ?? {
+            result: (options?.forceRefresh
+                ? undefined
+                : containerInStore?.result) ?? {
                 tag: tagName,
             },
             updateAvailable: false,

@@ -176,6 +176,117 @@ export function reconcileEntrypoint(
     return normalizeCommand(containerEntrypoint);
 }
 
+export interface DockerProgressDetail {
+    current?: number;
+    total?: number;
+    [key: string]: unknown;
+}
+
+export interface DockerProgressEvent {
+    id?: string;
+    status?: string;
+    progress?: string;
+    progressDetail?: DockerProgressDetail;
+    error?: string;
+    errorDetail?: {
+        message?: string;
+        code?: number;
+    };
+    [key: string]: unknown;
+}
+
+interface LayerProgressState {
+    lastStatus?: string;
+    lastProgress?: string;
+    lastLogTime: number;
+}
+
+/**
+ * Creates a rate-limited progress logger for Docker image pull streams.
+ * Status changes (e.g. Pulling fs layer -> Downloading -> Download complete -> Extracting -> Pull complete)
+ * are logged immediately. In-flight progress updates for the same status are throttled by throttleMs.
+ *
+ * @param logContainer - Logger instance
+ * @param throttleMs - Throttle interval in milliseconds for in-progress updates (default: 2000ms)
+ */
+export function createPullProgressLogger(
+    logContainer: Logger,
+    throttleMs = 2000,
+): (event: DockerProgressEvent) => void {
+    const layerStates = new Map<string, LayerProgressState>();
+    let lastGlobalStatus: string | undefined;
+    let lastGlobalProgress: string | undefined;
+    let lastGlobalLogTime = 0;
+
+    return (event: DockerProgressEvent): void => {
+        if (!event || (!event.status && !event.id)) {
+            return;
+        }
+
+        const now = Date.now();
+
+        let progressText = '';
+        if (event.progress) {
+            progressText = ` ${event.progress}`;
+        } else if (
+            typeof event.progressDetail?.current === 'number' &&
+            typeof event.progressDetail?.total === 'number' &&
+            event.progressDetail.total > 0
+        ) {
+            const pct = Math.round(
+                (event.progressDetail.current / event.progressDetail.total) *
+                    100,
+            );
+            progressText = ` [${pct}%]`;
+        }
+
+        if (event.id) {
+            const state = layerStates.get(event.id);
+            const statusChanged = !state || state.lastStatus !== event.status;
+
+            if (statusChanged) {
+                layerStates.set(event.id, {
+                    lastStatus: event.status,
+                    lastProgress: progressText,
+                    lastLogTime: now,
+                });
+            } else if (
+                progressText &&
+                progressText !== state.lastProgress &&
+                (throttleMs <= 0 || now - state.lastLogTime >= throttleMs)
+            ) {
+                state.lastProgress = progressText;
+                state.lastLogTime = now;
+            } else {
+                return;
+            }
+
+            const statusPart = event.status ? `: ${event.status}` : '';
+            logContainer.info(`Layer ${event.id}${statusPart}${progressText}`);
+        } else if (event.status) {
+            const statusChanged = lastGlobalStatus !== event.status;
+
+            if (statusChanged) {
+                lastGlobalStatus = event.status;
+                lastGlobalProgress = progressText;
+                lastGlobalLogTime = now;
+            } else if (
+                progressText &&
+                progressText !== lastGlobalProgress &&
+                (throttleMs <= 0 || now - lastGlobalLogTime >= throttleMs)
+            ) {
+                lastGlobalProgress = progressText;
+                lastGlobalLogTime = now;
+            } else {
+                return;
+            }
+
+            const prefix = event.status.startsWith('Status:') ? '' : 'Status: ';
+            logContainer.info(`${prefix}${event.status}${progressText}`);
+        }
+    };
+}
+
 export interface DockerConfiguration extends TriggerConfiguration {
     prune?: boolean;
     dryrun?: boolean;
@@ -315,6 +426,17 @@ class Docker extends Trigger {
             }
             return await image.inspect();
         } catch (e: any) {
+            const fqRef = this.getFullyQualifiedImage(imageRef);
+            if (fqRef && fqRef !== imageRef) {
+                try {
+                    const fqImage = await dockerApi.getImage(fqRef);
+                    if (fqImage && typeof fqImage.inspect === 'function') {
+                        return await fqImage.inspect();
+                    }
+                } catch {
+                    // Fall through to logging the original error
+                }
+            }
             logContainer.warn(
                 `Unable to inspect image ${imageRef} (${e.message})`,
             );
@@ -415,6 +537,8 @@ class Docker extends Trigger {
                 authconfig: auth,
             });
 
+            const onProgress = createPullProgressLogger(logContainer);
+
             await new Promise<void>((resolve, reject) => {
                 dockerApi.modem.followProgress(
                     pullStream,
@@ -447,14 +571,16 @@ class Docker extends Trigger {
                         }
                         return resolve();
                     },
+                    onProgress,
                 );
             });
             logContainer.info(`Image ${newImage} pulled with success`);
-        } catch (e: any) {
+        } catch (e: unknown) {
+            const err = e instanceof Error ? e : new Error(String(e));
             logContainer.warn(
-                `Error when pulling image ${newImage} (${e.message})`,
+                `Error when pulling image ${newImage} (${err.message})`,
             );
-            throw e;
+            throw err;
         }
     }
 
@@ -549,8 +675,14 @@ class Docker extends Trigger {
     ): Promise<Dockerode.Container> {
         logContainer.info(`Create container ${containerName}`);
         try {
+            const containerOptions = {
+                ...containerToCreate,
+                Image: containerToCreate.Image
+                    ? this.getFullyQualifiedImage(containerToCreate.Image)
+                    : containerToCreate.Image,
+            };
             const newContainer =
-                await dockerApi.createContainer(containerToCreate);
+                await dockerApi.createContainer(containerOptions);
             logContainer.info(
                 `Container ${containerName} recreated on new image with success`,
             );
@@ -784,6 +916,90 @@ class Docker extends Trigger {
     }
 
     /**
+     * Resolve the exact, fully qualified image reference.
+     * On Docker 29 with containerd image store active by default, Docker stores
+     * pulled images with their canonical reference (e.g. docker.io/library/nginx:1.31.2).
+     * Recreating containers with unqualified names (e.g. nginx:1.31.2) causes
+     * HTTP 404 No such image.
+     */
+    getFullyQualifiedImage(
+        image?: string,
+        imageSpec?: Dockerode.ImageInspectInfo,
+    ): string {
+        if (!image) {
+            return '';
+        }
+
+        // 1. If inspect spec of the pulled image is available, look for a matching RepoTag
+        if (imageSpec?.RepoTags && imageSpec.RepoTags.length > 0) {
+            if (imageSpec.RepoTags.includes(image)) {
+                return image;
+            }
+            const matchingTag = imageSpec.RepoTags.find((repoTag) => {
+                if (repoTag === image) {
+                    return true;
+                }
+                if (repoTag.endsWith(`/${image}`)) {
+                    return true;
+                }
+                if (repoTag.endsWith(`/library/${image}`)) {
+                    return true;
+                }
+                return false;
+            });
+            if (matchingTag) {
+                return matchingTag;
+            }
+        }
+
+        // 2. Separate tag or digest from the repository path
+        let repo = image;
+        let suffix = '';
+
+        if (image.includes('@')) {
+            const atIndex = image.indexOf('@');
+            repo = image.substring(0, atIndex);
+            suffix = image.substring(atIndex);
+        } else if (image.includes(':')) {
+            const slashIndex = image.indexOf('/');
+            const lastColonIndex = image.lastIndexOf(':');
+            if (slashIndex === -1 || lastColonIndex > slashIndex) {
+                repo = image.substring(0, lastColonIndex);
+                suffix = image.substring(lastColonIndex);
+            }
+        }
+
+        const parts = repo.split('/');
+
+        // Single part: e.g. 'nginx' -> 'docker.io/library/nginx'
+        if (parts.length === 1) {
+            return `docker.io/library/${parts[0]}${suffix}`;
+        }
+
+        // Two parts: e.g. 'bitnami/redis', 'library/nginx', 'ghcr.io/app', 'localhost:5000/app'
+        if (parts.length === 2) {
+            const [first, second] = parts;
+            if (
+                first.includes('.') ||
+                first.includes(':') ||
+                first === 'localhost'
+            ) {
+                if (first === 'docker.io' && !second.includes('/')) {
+                    return `docker.io/library/${second}${suffix}`;
+                }
+                return `${repo}${suffix}`;
+            }
+            if (first === 'library') {
+                return `docker.io/library/${second}${suffix}`;
+            }
+            return `docker.io/${first}/${second}${suffix}`;
+        }
+
+        // Three or more parts: e.g. 'docker.io/library/nginx', 'ghcr.io/org/repo'
+        return `${repo}${suffix}`;
+    }
+
+    /**
      * Clone container specs.
      */
     cloneContainer(
@@ -793,10 +1009,14 @@ class Docker extends Trigger {
         newImageSpec?: Dockerode.ImageInspectInfo,
     ): Dockerode.ContainerCreateOptions {
         const containerName = currentContainer.Name.replace('/', '');
+        const fullyQualifiedImage = this.getFullyQualifiedImage(
+            newImage,
+            newImageSpec,
+        );
         const containerClone: Dockerode.ContainerCreateOptions = {
             ...currentContainer.Config,
             name: containerName,
-            Image: newImage,
+            Image: fullyQualifiedImage,
             HostConfig: currentContainer.HostConfig,
             NetworkingConfig: {
                 EndpointsConfig: currentContainer.NetworkSettings?.Networks,
@@ -875,6 +1095,7 @@ class Docker extends Trigger {
             container.updateKind?.kind === 'digest'
                 ? container.image?.tag?.value
                 : (container.updateKind?.remoteValue ??
+                  container.result?.tag ??
                   container.image?.tag?.value ??
                   'latest');
 
@@ -942,6 +1163,7 @@ class Docker extends Trigger {
         const helper = await dockerApi.createContainer({
             name: helperName,
             Image: currentContainerSpec.Image,
+            Labels: { 'wud.watch': 'false' },
             Env: [`${SELF_UPDATE_PAYLOAD_ENV}=${JSON.stringify(payload)}`],
             // The helper does not serve HTTP, so the image healthcheck (which
             // curls the API) would only ever mark it unhealthy.
@@ -978,7 +1200,20 @@ class Docker extends Trigger {
             container.image,
             tagOrDigestToRemove,
         );
-        await this.removeImage(dockerApi, oldImage, logContainer);
+        const fqOldImage = this.getFullyQualifiedImage(oldImage);
+        try {
+            await this.removeImage(dockerApi, fqOldImage, logContainer);
+        } catch (e: any) {
+            if (fqOldImage !== oldImage) {
+                try {
+                    await this.removeImage(dockerApi, oldImage, logContainer);
+                    return;
+                } catch {
+                    // Fall through to throw original error
+                }
+            }
+            throw e;
+        }
     }
 
     /**
@@ -1063,6 +1298,53 @@ class Docker extends Trigger {
     }
 
     /**
+     * Check whether a container has a resolvable new tag or digest to update to.
+     */
+    hasResolvableUpdate(container: Container): boolean {
+        if (!container.updateAvailable) {
+            return false;
+        }
+
+        const updateKind = container.updateKind?.kind;
+        const remoteTag =
+            container.updateKind?.remoteValue ?? container.result?.tag;
+        const currentTag =
+            container.updateKind?.localValue ?? container.image?.tag?.value;
+        const remoteDigest =
+            container.updateKind?.remoteValue ?? container.result?.digest;
+        const currentDigest =
+            container.updateKind?.localValue ?? container.image?.digest?.value;
+
+        if (updateKind === 'digest') {
+            return Boolean(
+                remoteDigest &&
+                    remoteDigest !== currentDigest &&
+                    remoteDigest !== '',
+            );
+        }
+
+        if (updateKind === 'tag') {
+            return Boolean(
+                remoteTag && remoteTag !== currentTag && remoteTag !== '',
+            );
+        }
+
+        // Unknown or unspecified updateKind: verify whether either a tag or digest difference is resolvable
+        if (remoteTag && remoteTag !== currentTag && remoteTag !== '') {
+            return true;
+        }
+        if (
+            remoteDigest &&
+            remoteDigest !== currentDigest &&
+            remoteDigest !== ''
+        ) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
      * Replace the container according to the provided options.
      *
      * When a rollback gate is enabled (or `archive` is requested), the old
@@ -1080,6 +1362,17 @@ class Docker extends Trigger {
         if (!container.updateAvailable) {
             logContainer.info(
                 `No update available for container ${fullName(container)} => skip trigger`,
+            );
+            return undefined;
+        }
+
+        if (!this.hasResolvableUpdate(container)) {
+            const candidateTag =
+                container.updateKind?.remoteValue ??
+                container.result?.tag ??
+                'null';
+            logContainer.info(
+                `No resolvable update for container ${fullName(container)} (newTag: ${candidateTag}) => skip trigger`,
             );
             return undefined;
         }
@@ -1179,6 +1472,17 @@ class Docker extends Trigger {
             logContainer,
         );
 
+        if (
+            newImageSpec &&
+            currentContainerSpec.Image &&
+            newImageSpec.Id === currentContainerSpec.Image
+        ) {
+            logContainer.info(
+                `Container ${container.name} is already running the latest image (${newImageSpec.Id}) => skip trigger`,
+            );
+            return undefined;
+        }
+
         // Clone current container spec
         const containerToCreateInspect = this.cloneContainer(
             currentContainerSpec,
@@ -1215,29 +1519,154 @@ class Docker extends Trigger {
 
         // Quality Gate Pre-update hooks
         const runHooks = opts.runHooks ?? true;
-        if (runHooks) {
-            await HookManager.runPreHooks(container, this.configuration.hooks, {
-                triggerName: this.name,
-                dockerApi,
-                log: logContainer,
-            });
-        }
+        try {
+            event.emitContainerUpdatePre(container);
+            if (runHooks) {
+                await HookManager.runPreHooks(
+                    container,
+                    this.configuration.hooks,
+                    {
+                        triggerName: this.name,
+                        dockerApi,
+                        log: logContainer,
+                    },
+                );
+            }
 
-        // Gated / archived path.
-        if (useArchive) {
-            const outcome = await this.replaceWithHealthGate(
-                dockerApi,
-                registry,
-                container,
-                currentContainer,
-                currentContainerSpec,
-                containerToCreateInspect,
-                opts.gate ?? this.resolveRollback(container),
-                currentContainerState.Running,
-                { ...opts, deferPrune },
-                logContainer,
-            );
-            if (!outcome.rolledBack && runHooks) {
+            // Gated / archived path.
+            if (useArchive) {
+                const outcome = await this.replaceWithHealthGate(
+                    dockerApi,
+                    registry,
+                    container,
+                    currentContainer,
+                    currentContainerSpec,
+                    containerToCreateInspect,
+                    opts.gate ?? this.resolveRollback(container),
+                    currentContainerState.Running,
+                    { ...opts, deferPrune },
+                    logContainer,
+                );
+
+                if (outcome.rolledBack) {
+                    if (runHooks) {
+                        await HookManager.runRollbackHooks(
+                            container,
+                            this.configuration.hooks,
+                            {
+                                triggerName: this.name,
+                                dockerApi,
+                                log: logContainer,
+                            },
+                        );
+                    }
+                    const restoredContainerId =
+                        outcome.containerId || currentContainerSpec.Id;
+                    try {
+                        await watcher.reconcileContainer(restoredContainerId, {
+                            forceRefresh: true,
+                        });
+                    } catch (reconcileErr: any) {
+                        logContainer.warn(
+                            `Post-rollback reconcile failed for container ${restoredContainerId}: ${reconcileErr.message}`,
+                        );
+                    }
+                } else {
+                    if (runHooks) {
+                        await HookManager.runPostHooks(
+                            container,
+                            this.configuration.hooks,
+                            {
+                                triggerName: this.name,
+                                dockerApi,
+                                log: logContainer,
+                            },
+                        );
+                    }
+                    event.emitContainerUpdateSuccess(container);
+
+                    const newContainerId = outcome.containerId;
+                    const oldContainerId = currentContainerSpec.Id;
+                    if (newContainerId) {
+                        try {
+                            await watcher.reconcileContainer(newContainerId, {
+                                oldContainerId,
+                                forceRefresh: true,
+                            });
+                        } catch (reconcileErr: any) {
+                            logContainer.warn(
+                                `Post-update reconcile failed for container ${newContainerId}: ${reconcileErr.message}`,
+                            );
+                        }
+                    }
+                }
+                return outcome;
+            }
+
+            // Stop current container
+            if (currentContainerState.Running) {
+                await this.stopContainer(
+                    currentContainer,
+                    container.name,
+                    container.id,
+                    logContainer,
+                );
+            }
+
+            if (!autoRemove) {
+                // Remove current container
+                await this.removeContainer(
+                    currentContainer,
+                    container.name,
+                    container.id,
+                    logContainer,
+                );
+            } else {
+                // This is a special case when the container is set to be removed automatically when it stops.
+                // In this case, we need to wait for the container to be removed before creating the new one.
+                await this.waitContainerRemoved(
+                    currentContainer,
+                    container.name,
+                    container.id,
+                    logContainer,
+                );
+            }
+
+            // Create new container
+            const newContainer =
+                await this.createContainerWithMultiNetworkFallback(
+                    dockerApi,
+                    containerToCreateInspect,
+                    currentContainerSpec,
+                    container.name,
+                    logContainer,
+                );
+
+            // Start container if it was running
+            if (currentContainerState.Running) {
+                await this.startContainer(
+                    newContainer,
+                    container.name,
+                    logContainer,
+                );
+            }
+
+            // Post-update reconciliation
+            const newContainerId = newContainer.id;
+            const oldContainerId = currentContainerSpec.Id;
+            try {
+                await watcher.reconcileContainer(newContainerId, {
+                    oldContainerId,
+                    forceRefresh: true,
+                });
+            } catch (reconcileErr: any) {
+                logContainer.warn(
+                    `Post-update reconcile failed for container ${newContainerId}: ${reconcileErr.message}`,
+                );
+            }
+
+            // Post-update hooks
+            if (runHooks) {
                 await HookManager.runPostHooks(
                     container,
                     this.configuration.hooks,
@@ -1248,77 +1677,39 @@ class Docker extends Trigger {
                     },
                 );
             }
-            return outcome;
-        }
+            event.emitContainerUpdateSuccess(container);
 
-        // Stop current container
-        if (currentContainerState.Running) {
-            await this.stopContainer(
-                currentContainer,
-                container.name,
-                container.id,
-                logContainer,
-            );
-        }
-
-        if (!autoRemove) {
-            // Remove current container
-            await this.removeContainer(
-                currentContainer,
-                container.name,
-                container.id,
-                logContainer,
-            );
-        } else {
-            // This is a special case when the container is set to be removed automatically when it stops.
-            // In this case, we need to wait for the container to be removed before creating the new one.
-            await this.waitContainerRemoved(
-                currentContainer,
-                container.name,
-                container.id,
-                logContainer,
-            );
-        }
-
-        // Create new container
-        const newContainer = await this.createContainerWithMultiNetworkFallback(
-            dockerApi,
-            containerToCreateInspect,
-            currentContainerSpec,
-            container.name,
-            logContainer,
-        );
-
-        // Start container if it was running
-        if (currentContainerState.Running) {
-            await this.startContainer(
-                newContainer,
-                container.name,
-                logContainer,
-            );
-        }
-
-        // Post-update hooks
-        if (runHooks) {
-            await HookManager.runPostHooks(
-                container,
-                this.configuration.hooks,
-                {
-                    triggerName: this.name,
+            // Remove previous image (only when updateKind is tag)
+            if (this.configuration.prune) {
+                await this.removePreviousImage(
                     dockerApi,
-                    log: logContainer,
-                },
-            );
-        }
-
-        // Remove previous image (only when updateKind is tag)
-        if (this.configuration.prune) {
-            await this.removePreviousImage(
-                dockerApi,
-                registry,
-                container,
-                logContainer,
-            );
+                    registry,
+                    container,
+                    logContainer,
+                );
+            }
+        } catch (e: any) {
+            logContainer.error(`Container update failed: ${e.message}`);
+            if (runHooks) {
+                try {
+                    await HookManager.runFailureHooks(
+                        container,
+                        this.configuration.hooks,
+                        {
+                            triggerName: this.name,
+                            dockerApi,
+                            log: logContainer,
+                        },
+                    );
+                } catch (hookErr: any) {
+                    logContainer.error(
+                        `Failure hooks failed: ${hookErr.message}`,
+                    );
+                }
+            }
+            container.error = e.message;
+            event.emitContainerUpdateFailure(container);
+            throw e;
         }
         return undefined;
     }

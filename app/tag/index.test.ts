@@ -1,4 +1,5 @@
 // @ts-nocheck
+import log from '../log';
 import * as semver from './index';
 
 describe('parse', () => {
@@ -375,6 +376,24 @@ describe('isGreater', () => {
             expected: false,
             desc: 'legacy Ubuntu CalVer tag vs SemVer release',
         },
+        {
+            v1: '20.04.1',
+            v2: '2.4.1',
+            expected: false,
+            desc: 'legacy Ubuntu CalVer tag vs SemVer release (#1361)',
+        },
+        {
+            v1: '24.04.9-1.1',
+            v2: '24.04.8-1.1',
+            expected: true,
+            desc: 'upgrading 2-digit CalVer to newer 2-digit CalVer (#1361)',
+        },
+        {
+            v1: '24.04.9',
+            v2: '24.04.8',
+            expected: true,
+            desc: 'upgrading 2-digit CalVer to newer 2-digit CalVer (#1361)',
+        },
 
         // Architecture-prefixed versions (#135, #625)
         {
@@ -559,6 +578,50 @@ describe('transform', () => {
             expect(
                 semver.transform('^(\\d+)-(\\d+)(-(a|b))?$ => $2.$1-$4', '3-4'),
             ).toBe('4.3-');
+        });
+    });
+
+    describe('error logging with container name (#752)', () => {
+        let warnSpy;
+
+        beforeEach(() => {
+            warnSpy = jest.spyOn(log, 'warn').mockImplementation(() => {});
+        });
+
+        afterEach(() => {
+            warnSpy.mockRestore();
+        });
+
+        test('should include container name in warning log when container name is a string', () => {
+            semver.transform('[invalid-regex => $1', '1.2.3', 'my-container');
+            expect(warnSpy).toHaveBeenCalledWith(
+                'Error when applying transform function [[invalid-regex => $1] to tag [1.2.3] for container [my-container]',
+            );
+        });
+
+        test('should include container name in warning log when container object is provided', () => {
+            semver.transform('^nomatch$ => $1', '4.0.5', {
+                name: 'web-app',
+            });
+            expect(warnSpy).toHaveBeenCalledWith(
+                'Error when applying transform function [^nomatch$ => $1] to tag [4.0.5] for container [web-app]',
+            );
+        });
+
+        test('should include container id in warning log when container has id but no name', () => {
+            semver.transform('invalid-formula', '1.0.0', {
+                id: 'container-id-123',
+            });
+            expect(warnSpy).toHaveBeenCalledWith(
+                'Error when applying transform function [invalid-formula] to tag [1.0.0] for container [container-id-123]',
+            );
+        });
+
+        test('should log error without container suffix when no container context is provided', () => {
+            semver.transform('invalid-formula', '1.0.0');
+            expect(warnSpy).toHaveBeenCalledWith(
+                'Error when applying transform function [invalid-formula] to tag [1.0.0]',
+            );
         });
     });
 });

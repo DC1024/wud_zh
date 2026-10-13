@@ -6,12 +6,17 @@ import { AlternativesSchema, ObjectSchema } from 'joi';
 
 export interface TriggerConfiguration extends ComponentConfiguration {
     auto?: boolean;
+    events?: string | string[];
     threshold?: string;
     mode?: string;
     once?: boolean;
     simpletitle?: string;
     simplebody?: string;
     batchtitle?: string;
+    successtitle?: string;
+    successbody?: string;
+    failuretitle?: string;
+    failurebody?: string;
     rollbacktitle?: string;
     rollbackbody?: string;
     includebydefault?: boolean;
@@ -159,6 +164,45 @@ class Trigger extends Component {
     }
 
     /**
+     * Find a label value by base suffix checking `wud.<suffix>`, `getwud.app/<suffix>`, and `<suffix>`.
+     */
+    static findLabelValue(
+        labels: Record<string, unknown> | undefined,
+        suffix: string,
+    ): unknown {
+        if (!labels) {
+            return undefined;
+        }
+        const candidates = [`wud.${suffix}`, `getwud.app/${suffix}`, suffix];
+        for (const key of candidates) {
+            if (labels[key] !== undefined) {
+                return labels[key];
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Parse a boolean value from label string or boolean.
+     */
+    static parseBooleanLabel(value: unknown): boolean | undefined {
+        if (value === undefined || value === null) {
+            return undefined;
+        }
+        if (typeof value === 'boolean') {
+            return value;
+        }
+        const trimmed = String(value).trim().toLowerCase();
+        if (trimmed === 'true') {
+            return true;
+        }
+        if (trimmed === 'false') {
+            return false;
+        }
+        return undefined;
+    }
+
+    /**
      * Handle container report (simple mode).
      * @param containerReport
      * @returns {Promise<void>}
@@ -256,6 +300,57 @@ class Trigger extends Component {
         }
     }
 
+    getSubscribedEvents(container?: Container): string[] {
+        let events = this.configuration.events || ['available'];
+
+        // Surcharge par label (wud.trigger.<name>.events ou wud.trigger.events)
+        if (container?.labels) {
+            const specificLabel =
+                this.type && this.name
+                    ? container.labels[
+                          `wud.trigger.${this.type}.${this.name}.events`
+                      ]
+                    : undefined;
+            const typeLabel = this.type
+                ? container.labels[`wud.trigger.${this.type}.events`]
+                : undefined;
+            const genericLabel = container.labels['wud.trigger.events'];
+
+            const labelValue = specificLabel ?? typeLabel ?? genericLabel;
+            if (labelValue !== undefined) {
+                events = labelValue;
+            }
+        }
+
+        if (typeof events === 'string') {
+            events = events.split(',').map((e) => e.trim());
+        }
+        return events as string[];
+    }
+
+    async handleContainerUpdatePre(container: Container) {
+        if (!this.mustTrigger(container)) return;
+        if (!this.getSubscribedEvents(container).includes('pre')) return;
+        this.log.debug(`Handling pre-update event for ${container.name}`);
+        // Base logic for pre-update triggers can be added here or in overriding classes
+    }
+
+    async handleContainerUpdateSuccess(container: Container) {
+        if (!this.mustTrigger(container)) return;
+        if (!this.getSubscribedEvents(container).includes('success')) return;
+        this.log.debug(
+            `Handling successful update event for ${container.name}`,
+        );
+        // Base logic for success triggers can be added here or in overriding classes
+    }
+
+    async handleContainerUpdateFailure(container: Container) {
+        if (!this.mustTrigger(container)) return;
+        if (!this.getSubscribedEvents(container).includes('failure')) return;
+        this.log.debug(`Handling failed update event for ${container.name}`);
+        // Base logic for failure triggers can be added here or in overriding classes
+    }
+
     isTriggerIncludedOrExcluded(containerResult: Container, trigger: string) {
         const triggers = trigger
             .split(/\s*,\s*/)
@@ -333,14 +428,63 @@ class Trigger extends Component {
     }
 
     /**
+     * Return true if this trigger is enabled for the container.
+     * Precedence:
+     * 1. Specific instance label (wud.trigger.<type>.<name>.enabled)
+     * 2. Specific type label (wud.trigger.<type>.enabled)
+     * 3. Historical global filtering (wud.trigger.include / wud.trigger.exclude)
+     * 4. Default configuration (includebydefault !== false)
+     */
+    isTriggerEnabled(containerResult: Container): boolean {
+        const labels = containerResult.labels as
+            | Record<string, unknown>
+            | undefined;
+
+        if (this.type && this.name) {
+            const instanceVal = Trigger.parseBooleanLabel(
+                Trigger.findLabelValue(
+                    labels,
+                    `trigger.${this.type}.${this.name}.enabled`,
+                ),
+            );
+            if (instanceVal !== undefined) {
+                return instanceVal;
+            }
+        }
+
+        if (this.type) {
+            const typeVal = Trigger.parseBooleanLabel(
+                Trigger.findLabelValue(labels, `trigger.${this.type}.enabled`),
+            );
+            if (typeVal !== undefined) {
+                return typeVal;
+            }
+        }
+
+        const triggerInclude =
+            containerResult.triggerInclude ||
+            (Trigger.findLabelValue(labels, 'trigger.include') as
+                | string
+                | undefined);
+        const triggerExclude =
+            containerResult.triggerExclude ||
+            (Trigger.findLabelValue(labels, 'trigger.exclude') as
+                | string
+                | undefined);
+
+        return (
+            this.isTriggerIncluded(containerResult, triggerInclude) &&
+            !this.isTriggerExcluded(containerResult, triggerExclude)
+        );
+    }
+
+    /**
      * Return true if must trigger on this container.
      */
     mustTrigger(containerResult: Container) {
-        const { triggerInclude, triggerExclude } = containerResult;
         return (
             this.isDigestAllowed(containerResult) &&
-            this.isTriggerIncluded(containerResult, triggerInclude) &&
-            !this.isTriggerExcluded(containerResult, triggerExclude)
+            this.isTriggerEnabled(containerResult)
         );
     }
 
@@ -351,22 +495,35 @@ class Trigger extends Component {
         await this.initTrigger();
         if (this.configuration.auto) {
             this.log.info(`Registering for auto execution`);
-            if (
-                this.configuration.mode &&
-                this.configuration.mode.toLowerCase() === 'simple'
-            ) {
-                event.registerContainerReport(async (containerReport) =>
-                    this.handleContainerReport(containerReport),
-                );
+            const configuredEvents = this.getSubscribedEvents();
+            if (configuredEvents.includes('available')) {
+                // To keep backward compatibility, simple and batch modes still check global 'available' event
+                if (
+                    this.configuration.mode &&
+                    this.configuration.mode.toLowerCase() === 'simple'
+                ) {
+                    event.registerContainerReport(async (containerReport) =>
+                        this.handleContainerReport(containerReport),
+                    );
+                }
+                if (
+                    this.configuration.mode &&
+                    this.configuration.mode.toLowerCase() === 'batch'
+                ) {
+                    event.registerContainerReports(async (containersReports) =>
+                        this.handleContainerReports(containersReports),
+                    );
+                }
             }
-            if (
-                this.configuration.mode &&
-                this.configuration.mode.toLowerCase() === 'batch'
-            ) {
-                event.registerContainerReports(async (containersReports) =>
-                    this.handleContainerReports(containersReports),
-                );
-            }
+            event.registerContainerUpdatePre(async (container) =>
+                this.handleContainerUpdatePre(container),
+            );
+            event.registerContainerUpdateSuccess(async (container) =>
+                this.handleContainerUpdateSuccess(container),
+            );
+            event.registerContainerUpdateFailure(async (container) =>
+                this.handleContainerUpdateFailure(container),
+            );
         } else {
             this.log.info(`Registering for manual execution`);
         }
@@ -430,6 +587,13 @@ class Trigger extends Component {
         const schema = this.getConfigurationSchema() as ObjectSchema;
         const schemaWithDefaultOptions = schema.append({
             auto: this.joi.bool().default(true),
+            events: this.joi
+                .alternatives()
+                .try(
+                    this.joi.string(),
+                    this.joi.array().items(this.joi.string()),
+                )
+                .default(['available']),
             threshold: this.joi
                 .string()
                 .insensitive()
@@ -461,6 +625,20 @@ class Trigger extends Component {
             batchtitle: this.joi
                 .string()
                 .default('${containers.length} updates available'),
+            successtitle: this.joi
+                .string()
+                .default('Update SUCCESS for ${container.name}'),
+            successbody: this.joi
+                .string()
+                .default(
+                    'Container ${container.name} has been successfully updated.',
+                ),
+            failuretitle: this.joi
+                .string()
+                .default('Update FAILED for ${container.name}'),
+            failurebody: this.joi
+                .string()
+                .default('Container ${container.name} update failed: ${error}'),
             rollbacktitle: this.joi
                 .string()
                 .default(Trigger.DEFAULT_ROLLBACK_TITLE),

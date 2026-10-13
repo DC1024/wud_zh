@@ -237,7 +237,7 @@ function getLink(container: Container, originalTagValue: string) {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const original = originalTagValue;
     const transformed = container.transformTags
-        ? transformTag(container.transformTags, originalTagValue)
+        ? transformTag(container.transformTags, originalTagValue, container)
         : originalTagValue;
     let major = '';
     let minor = '';
@@ -306,15 +306,23 @@ function isCandidateUpdateAvailable(container: Container): boolean {
 
     // Compare tags otherwise
     let updateAvailable = false;
-    const localTag = transformTag(
-        container.transformTags,
-        container.image.tag.value,
-    );
-    const remoteTag = transformTag(
-        container.transformTags,
-        container.result.tag,
-    );
-    updateAvailable = localTag !== remoteTag;
+    if (
+        container.result.tag !== undefined &&
+        container.result.tag !== null &&
+        container.result.tag !== ''
+    ) {
+        const localTag = transformTag(
+            container.transformTags,
+            container.image.tag.value,
+            container,
+        );
+        const remoteTag = transformTag(
+            container.transformTags,
+            container.result.tag,
+            container,
+        );
+        updateAvailable = localTag !== remoteTag;
+    }
 
     // Fallback to image created date (especially for legacy v1 manifests)
     if (
@@ -435,7 +443,12 @@ function addUpdateKindProperty(container: Container) {
                 container.result !== undefined &&
                 container.updateAvailable
             ) {
-                if (container.image.tag.value !== container.result.tag) {
+                if (
+                    container.result.tag !== undefined &&
+                    container.result.tag !== null &&
+                    container.result.tag !== '' &&
+                    container.image.tag.value !== container.result.tag
+                ) {
                     updateKind.kind = 'tag';
                     let semverDiffWud: ContainerUpdateKind['semverDiff'] =
                         'unknown';
@@ -445,10 +458,12 @@ function addUpdateKindProperty(container: Container) {
                             transformTag(
                                 container.transformTags,
                                 container.image.tag.value,
+                                container,
                             ),
                             transformTag(
                                 container.transformTags,
                                 container.result.tag,
+                                container,
                             ),
                         );
                         switch (semverDiff) {

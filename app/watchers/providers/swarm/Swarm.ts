@@ -45,6 +45,10 @@ import {
     resolveRegistry,
     isRegistryRegistered,
 } from '../../../registries/registryProvider';
+import {
+    resolveCandidateTag,
+    isNonContainerArtifactError,
+} from '../../../registries/Registry';
 import { isOneshot } from '../../../runtime/mode';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
@@ -120,6 +124,26 @@ export function isServiceImageChanged(
             containerInStore.image?.digest?.repo !== pinnedDigest &&
             containerInStore.image?.digest?.value !== pinnedDigest)
     );
+}
+
+/**
+ * Normalize node architecture string to standard container registry architectures.
+ */
+export function normalizeArchitecture(arch?: string): string {
+    if (!arch) {
+        return 'amd64';
+    }
+    const lower = arch.toLowerCase().trim();
+    if (lower === 'x86_64' || lower === 'amd64') {
+        return 'amd64';
+    }
+    if (lower === 'aarch64' || lower === 'arm64') {
+        return 'arm64';
+    }
+    if (lower.startsWith('arm')) {
+        return 'arm';
+    }
+    return lower;
 }
 
 function getRegistries() {
@@ -238,7 +262,7 @@ export class Swarm extends Watcher {
             if (nodes && nodes.length > 0) {
                 const arch = nodes[0]?.Description?.Platform?.Architecture;
                 if (arch) {
-                    return arch === 'x86_64' ? 'amd64' : arch;
+                    return normalizeArchitecture(arch);
                 }
             }
         } catch (e: any) {
@@ -248,9 +272,7 @@ export class Swarm extends Watcher {
         try {
             const info = await this.docker.info();
             if (info?.Architecture) {
-                return info.Architecture === 'x86_64'
-                    ? 'amd64'
-                    : info.Architecture;
+                return normalizeArchitecture(info.Architecture);
             }
         } catch (e: any) {
             this.log.debug(`Unable to fetch Docker info: ${e.message}`);
@@ -468,7 +490,9 @@ export class Swarm extends Watcher {
                 getLabelValue(mergedLabels, KEY_WATCH_DELAY) ||
                 getLabelValue(mergedLabels, KEY_TAG_DELAY);
 
-            const parsedTag = parseSemver(transformTag(transformTags, tagName));
+            const parsedTag = parseSemver(
+                transformTag(transformTags, tagName, serviceName),
+            );
             const isSemver = parsedTag !== null && parsedTag !== undefined;
 
             const watchDigestLabel = getLabelValue(
@@ -624,21 +648,42 @@ export class Swarm extends Watcher {
             logContainer,
         );
 
-        if (tagsCandidates.length > 0) {
-            result.tag = tagsCandidates[0];
+        const { tag: candidateTag, remoteDigest: candidateRemoteDigest } =
+            await resolveCandidateTag(
+                registryProvider,
+                container.image,
+                tagsCandidates,
+                logContainer,
+            );
+
+        if (candidateTag) {
+            result.tag = candidateTag;
         }
 
         if (watchDigest && container.image.digest.repo) {
             const imageToGetDigestFrom = JSON.parse(
                 JSON.stringify(container.image),
             );
-            if (tagsCandidates.length > 0) {
-                [imageToGetDigestFrom.tag.value] = tagsCandidates;
+            if (candidateTag) {
+                imageToGetDigestFrom.tag.value = candidateTag;
             }
-            const remoteDigest =
-                await registryProvider.getImageManifestDigest(
-                    imageToGetDigestFrom,
-                );
+            let remoteDigest = candidateRemoteDigest;
+            if (!remoteDigest) {
+                try {
+                    remoteDigest =
+                        await registryProvider.getImageManifestDigest(
+                            imageToGetDigestFrom,
+                        );
+                } catch (e: any) {
+                    if (isNonContainerArtifactError(e)) {
+                        logContainer.warn(
+                            `Image ${imageToGetDigestFrom.name}:${imageToGetDigestFrom.tag.value} is a non-container OCI artifact`,
+                        );
+                        return result;
+                    }
+                    throw e;
+                }
+            }
             result.digest = remoteDigest.digest;
             result.created = remoteDigest.created;
 
@@ -656,7 +701,7 @@ export class Swarm extends Watcher {
         return result;
     }
 
-    async watchContainer(container: Container) {
+    protected async checkContainer(container: Container) {
         const logContainer = this.log.child({
             container: fullName(container),
         }) as Logger;
@@ -854,8 +899,9 @@ export class Swarm extends Watcher {
 
             filteredTags = filteredTags.filter(
                 (tag) =>
-                    parseSemver(transformTag(container.transformTags, tag)) !==
-                    null,
+                    parseSemver(
+                        transformTag(container.transformTags, tag, container),
+                    ) !== null,
             );
 
             // Keep only tags with the same number of numeric segments
@@ -875,10 +921,12 @@ export class Swarm extends Watcher {
                 const tagTransformed = transformTag(
                     container.transformTags,
                     tag,
+                    container,
                 );
                 const currentTransformed = transformTag(
                     container.transformTags,
                     container.image.tag.value,
+                    container,
                 );
                 return (
                     tagTransformed !== currentTransformed &&
@@ -888,8 +936,8 @@ export class Swarm extends Watcher {
 
             filteredTags.sort((t1, t2) => {
                 const greater = isGreaterSemver(
-                    transformTag(container.transformTags, t2),
-                    transformTag(container.transformTags, t1),
+                    transformTag(container.transformTags, t2, container),
+                    transformTag(container.transformTags, t1, container),
                 );
                 return greater ? 1 : -1;
             });

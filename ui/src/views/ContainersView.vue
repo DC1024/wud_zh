@@ -541,6 +541,7 @@ import {
 import { getRegistryProviderIcon } from "@/services/registry";
 import { getUser } from "@/services/auth";
 import { eventService } from "@/services/event";
+import { copyToClipboard } from "@/services/clipboard";
 import { defineComponent } from "vue";
 
 export default defineComponent({
@@ -735,14 +736,19 @@ export default defineComponent({
       return [...new Set(allStacks)].sort();
     },
     updateKinds() {
-      return [
-        ...new Set(
-          this.containers
-            .filter((c) => c.updateAvailable && c.updateKind?.kind === "tag" && c.updateKind?.semverDiff)
-            .map((c) => c.updateKind.semverDiff)
-            .sort()
-        ),
-      ];
+      const kinds = this.containers
+        .filter((c) => c.updateAvailable)
+        .map((c) => {
+          if (c.updateKind?.kind === "digest") {
+            return "digest";
+          }
+          if (c.updateKind?.kind === "tag" && c.updateKind?.semverDiff) {
+            return c.updateKind.semverDiff;
+          }
+          return null;
+        })
+        .filter((k): k is string => Boolean(k));
+      return [...new Set(kinds)].sort();
     },
     /**
      * Containers the watcher knows about but that are not monitored, narrowed
@@ -786,7 +792,13 @@ export default defineComponent({
         .filter((c) => (this.registrySelected ? this.registrySelected === c.image?.registry?.name : true))
         .filter((c) => (this.watcherSelected ? this.watcherSelected === c.watcher : true))
         .filter((c) => (this.stackSelected ? this.stackSelected === c.stack : true))
-        .filter((c) => (this.updateKindSelected ? this.updateKindSelected === c.updateKind?.semverDiff : true))
+        .filter((c) => {
+          if (!this.updateKindSelected) return true;
+          if (this.updateKindSelected === "digest") {
+            return c.updateKind?.kind === "digest";
+          }
+          return c.updateKind?.semverDiff === this.updateKindSelected;
+        })
         .filter((c) => (this.updateAvailableSelected ? c.updateAvailable : true))
         .filter((c) => {
           if (!this.searchQuery) return true;
@@ -863,12 +875,22 @@ export default defineComponent({
       return "info";
     },
 
-    copyToClipboard(kind: string, value: string) {
-      navigator.clipboard.writeText(value);
-      (this as any).$eventBus.emit(
-        "notify",
-        (this as any).$t("common.copied", { kind: (this as any).$t(kind) }),
-      );
+    async copyToClipboard(kind: string, value: string) {
+      const copied = await copyToClipboard(value);
+      if (copied) {
+        (this as any).$eventBus.emit(
+          "notify",
+          (this as any).$t("common.copied", { kind: (this as any).$t(kind) }),
+        );
+      } else {
+        (this as any).$eventBus.emit(
+          "notify",
+          (this as any).$t("common.copyFailed", {
+            kind: (this as any).$t(kind),
+          }),
+          "warning",
+        );
+      }
     },
 
     confirmDelete(container: any) {
