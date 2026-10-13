@@ -21,13 +21,14 @@ Feature: Prometheus exposure
     And response body should contain result_tag="<resultTag>"
     And response body should contain update_available="<updateAvailable>"
     Examples:
-      | containerName            | registry     | registryUrl                                             | imageName                    | tag               | resultTag         | updateAvailable |
-      # | ecr_sub_sub_test         | ecr.private  | https://229211676173.dkr.ecr.eu-west-1.amazonaws.com/v2 | sub/sub/test                 | 1.0.0             | 2.0.0             | true            |
-      # The linuxserver/radarr tag is re-released continuously (ls319 -> ls320 -> ...).
-      # Assert only the stable prefix so the suite does not rot on every release.
-      | ghcr_radarr              | ghcr.private | https://ghcr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6.4.4.10685-ls3 | false           |
-      | hub_alpine_latest        | hub.public   | https://registry-1.docker.io/v2                         | library/alpine               | latest            | latest            | false           |
-      | hub_homeassistant_202161 | hub.public   | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | 2026.10.1         | false           |
-      | hub_nginx_latest         | hub.public   | https://registry-1.docker.io/v2                         | library/nginx                | latest            | latest            | true            |
-      | lscr_radarr              | lscr.private | https://lscr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6.4.4.10685-ls3 | true            |
-      | quay_prometheus          | quay.public  | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v3.15.0           | true            |
+      | containerName            | registry     | registryUrl                                             | imageName                    | tag               | resultTag          | updateAvailable |
+      # | ecr_sub_sub_test         | ecr.private  | https://229211676173.dkr.ecr.eu-west-1.amazonaws.com/v2 | sub/sub/test                 | 1.0.0             | 2.0.0              | true            |
+      # apickli compiles the expected value of "response body should contain" as a RegExp;
+      # linuxserver/radarr is re-released continuously (ls319 -> ls320 -> ...), so assert
+      # the tag shape instead of a frozen value to keep the suite from rotting.
+      | ghcr_radarr              | ghcr.private | https://ghcr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6\.4\.4\.\d+-ls\d+ | false           |
+      | hub_alpine_latest        | hub.public   | https://registry-1.docker.io/v2                         | library/alpine               | latest            | latest             | false           |
+      | hub_homeassistant_202161 | hub.public   | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | 2026.10.1          | false           |
+      | hub_nginx_latest         | hub.public   | https://registry-1.docker.io/v2                         | library/nginx                | latest            | latest             | true            |
+      | lscr_radarr              | lscr.private | https://lscr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6\.4\.4\.\d+-ls\d+ | true            |
+      | quay_prometheus          | quay.public  | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v3.15.0            | true            |
