@@ -69,6 +69,8 @@ const REFRESH_EVERY = 3; // 每 3 轮（30s）触发一次重查
 //   避免 WUD 已经收到指令、重试又触发一次重建。
 const API_RETRIES = 3; // 总尝试次数
 const API_RETRY_MS = 10000; // 每次重试间隔
+const UPDATE_RETRIES = 3; // 五修：整轮更新（触发+轮询）失败后的最大重试次数
+const UPDATE_RETRY_MS = 60000; // 每轮更新重试间隔（60s，给 WUD 从竞态/unknown 态恢复）
 
 async function once(path, opts) {
   const headers = {
@@ -221,8 +223,33 @@ async function main() {
   let afterRepo = beforeRepo;
   let afterId = id;
 
-  if (!skip) {
+  // 五修（2026-10-16）：整轮更新（触发 + 轮询确认）失败后自动重试，
+  // 最多 UPDATE_RETRIES 次。首失败即发「将自动重试」通知，重试成功则发
+  // 正常成功邮件，全部失败才发最终失败邮件。动机：23:56 agent2api 案例——
+  // wud_zh 新版 docker.local 触发器在 updateKind 瞬时 unknown/竞态时抛
+  // 「Assignment to constant variable」，实际无事，重试即愈。
+  async function notify(subject, body) {
     try {
+      const transport = nodemailer.createTransport(MAIL);
+      await transport.sendMail({ from: FROM, to: TO, subject, text: body });
+      console.log('[mail] sent: ' + subject);
+    } catch (e) {
+      console.error('[mail] FAILED: ' + e.message);
+      process.exitCode = 2;
+    }
+    console.log(subject);
+  }
+
+  if (!skip) {
+    for (let attempt = 1; attempt <= UPDATE_RETRIES && !updated; attempt++) {
+      errMsg = null;
+      if (attempt > 1) {
+        console.log(
+          '[retry] 第 ' + attempt + '/' + UPDATE_RETRIES + ' 次尝试更新 ' + name,
+        );
+        await sleep(UPDATE_RETRY_MS);
+      }
+      try {
       // 触发时拿到的 id 也可能已经过期（WUD 重启 / 库重建后 id 会变）。
       // 先按容器名解析出当前 id 再 POST，避免 POST 直接 404 秒判「更新调用失败」。
       let pre = null;
@@ -380,8 +407,45 @@ async function main() {
           (afterId !== id ? '，容器已重建' : '，容器未重建') +
           '）';
       }
-    } catch (e) {
-      errMsg = '更新调用失败: ' + e.message;
+      } catch (e) {
+        errMsg = '更新调用失败: ' + e.message;
+      }
+
+      if (updated) {
+        reason =
+          (reason ? reason + '；' : '') +
+          '第 ' +
+          attempt +
+          '/' +
+          UPDATE_RETRIES +
+          ' 次尝试成功';
+        break;
+      }
+      if (attempt < UPDATE_RETRIES) {
+        console.log(
+          '[retry] 第 ' +
+            attempt +
+            ' 次失败: ' +
+            errMsg +
+            '，' +
+            UPDATE_RETRY_MS / 1000 +
+            's 后重试',
+        );
+        await notify(
+          '容器更新将自动重试: ' + name,
+          [
+            '容器 ' + name + ' 第 ' + attempt + ' 次更新尝试未成功，将自动重试。',
+            '已尝试: ' + attempt + '/' + UPDATE_RETRIES,
+            '失败原因: ' + errMsg,
+            '约 ' + UPDATE_RETRY_MS / 1000 + ' 秒后进行第 ' + (attempt + 1) + ' 次尝试。',
+            '若最终成功会另行发送成功通知；若 ' + UPDATE_RETRIES + ' 次全部失败会发送失败通知。',
+            '时间: ' + fmtTime(),
+          ].join('\n'),
+        );
+      }
+    }
+    if (!updated && errMsg) {
+      errMsg = errMsg + '（已自动重试 ' + UPDATE_RETRIES + ' 次，均失败）';
     }
   } else {
     updated = true;
@@ -418,15 +482,7 @@ async function main() {
         '时间: ' + fmtTime(),
       ].join('\n');
 
-  try {
-    const transport = nodemailer.createTransport(MAIL);
-    await transport.sendMail({ from: FROM, to: TO, subject, text: body });
-    console.log('[mail] sent: ' + subject);
-  } catch (e) {
-    console.error('[mail] FAILED: ' + e.message);
-    process.exitCode = 2;
-  }
-  console.log(subject);
+  await notify(subject, body);
 }
 
 main().catch((e) => {
