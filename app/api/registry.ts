@@ -69,6 +69,22 @@ function isPrivateIp(ip: string): boolean {
 }
 
 /**
+ * Resolve a hostname to a single IP. Uses the callback form of `dns.lookup`
+ * because some Node builds do not expose a promise-based `dns.lookup` (they
+ * require a callback even with `{ all: false }`), so the Promise overload would
+ * throw "callback must be of type function". The callback form is portable.
+ */
+function resolveHost(
+    host: string,
+): Promise<{ address: string; family: number }> {
+    return new Promise((resolve, reject) => {
+        dns.lookup(host, { all: false }, (err, address, family) =>
+            err ? reject(err) : resolve({ address, family }),
+        );
+    });
+}
+
+/**
  * Validate + resolve a mirror base URL for SSRF safety.
  *  - Rejects non http/https schemes (file://, gopher://, dict://, ...).
  *  - Resolves the hostname once and pins the IP (closes DNS-rebinding TOCTOU).
@@ -100,9 +116,7 @@ async function resolveAndGuard(base: string): Promise<{
         };
     }
     try {
-        const { address, family } = await dns.lookup(parsed.hostname, {
-            all: false,
-        });
+        const { address, family } = await resolveHost(parsed.hostname);
         const blocked = !allowPrivateTarget() && isPrivateIp(address);
         return { ok: true, ip: address, family, blocked };
     } catch {

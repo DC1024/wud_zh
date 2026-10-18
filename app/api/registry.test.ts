@@ -34,8 +34,17 @@ jest.mock('axios', () => {
 });
 
 jest.mock('dns', () => {
-    const lookup = jest.fn((_host: string, _opts: any) =>
-        Promise.resolve({ address: '93.184.216.34', family: 4 }),
+    const lookup = jest.fn(
+        (
+            _host: string,
+            _opts: any,
+            cb?: (err: any, address?: string, family?: number) => void,
+        ) => {
+            if (typeof cb === 'function') {
+                cb(null, '93.184.216.34', 4);
+            }
+            return Promise.resolve({ address: '93.184.216.34', family: 4 });
+        },
     );
     return { lookup };
 });
@@ -196,10 +205,9 @@ describe('API Registry', () => {
         });
 
         test('POST /hub/mirrors/test blocks private/internal targets by default', async () => {
-            (dns.lookup as any).mockResolvedValueOnce({
-                address: '127.0.0.1',
-                family: 4,
-            });
+            (dns.lookup as any).mockImplementationOnce(
+                (_h: string, _o: any, cb: any) => cb(null, '127.0.0.1', 4),
+            );
             const res = await request(mirrorApp)
                 .post('/hub/mirrors/test')
                 .send({ url: 'http://localhost:5000' });
@@ -213,10 +221,9 @@ describe('API Registry', () => {
         test('POST /hub/mirrors/test permits private target when ALLOW_PRIVATE is set', async () => {
             const prev = process.env.WUD_REGISTRY_MIRROR_ALLOW_PRIVATE;
             process.env.WUD_REGISTRY_MIRROR_ALLOW_PRIVATE = 'true';
-            (dns.lookup as any).mockResolvedValueOnce({
-                address: '127.0.0.1',
-                family: 4,
-            });
+            (dns.lookup as any).mockImplementationOnce(
+                (_h: string, _o: any, cb: any) => cb(null, '127.0.0.1', 4),
+            );
             try {
                 const res = await request(mirrorApp)
                     .post('/hub/mirrors/test')
@@ -232,7 +239,9 @@ describe('API Registry', () => {
         });
 
         test('POST /hub/mirrors/test treats DNS failure as not-blocked', async () => {
-            (dns.lookup as any).mockRejectedValueOnce(new Error('ENOTFOUND'));
+            (dns.lookup as any).mockImplementationOnce(
+                (_h: string, _o: any, cb: any) => cb(new Error('ENOTFOUND')),
+            );
             const res = await request(mirrorApp)
                 .post('/hub/mirrors/test')
                 .send({ url: 'https://mirror-unknown.example.com' });
