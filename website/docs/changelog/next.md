@@ -13,6 +13,7 @@ description: Unreleased changes and upcoming features in WUD (What's Up Docker?)
 - 🚀 [UI] Display and search container metadata in log view (fixes #1419)
 - 🐛 [AUTH] Invalidate active sessions when user is deleted
 - 🐛 [CORE] Fix graceful shutdown on SIGTERM (fixes #1397)
+- 🐛 [CORE] Move the fork's `watched_containers` migration off upstream's id space (9005) and key applied migrations by name, so an upstream migration can no longer collide with it
 - 🐛 [CORE] Resilient Docker event stream with exponential backoff and targeted single-container reconciliation on update (fixes #1393)
 - 🐛 [REGISTRY] Fix Hub mirror failover corrupting the configured registry URL under concurrent scans
 - 🐛 [TRIGGER] Apply Docker Compose digest-only updates for floating tags without changing the image reference (fixes #1404)

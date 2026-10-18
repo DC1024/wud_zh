@@ -131,7 +131,7 @@ Docker Compose 同理，只改一行：
 | `ui/src/router/index.ts`、`ui/src/components/NavigationDrawer.vue` | 注册 `/watchlist` 路由与侧栏入口 |
 | `ui/src/services/container.ts`、`ui/src/services/mock/index.ts` | 发现接口与偏好接口的前端调用（含 demo 分支） |
 | `app/api/container.ts` | 新增 `GET /api/containers/discover`（列出全部容器，含未监控）与 `PUT /api/containers/watch-preference`（设置/清除偏好） |
-| `app/store/db/migrations.ts`、`app/store/db/schema.ts` | 新增 `watched_containers` 表（迁移 id=5） |
+| `app/store/db/migrations.ts`、`app/store/db/schema.ts` | 新增 `watched_containers` 表（迁移 id=**9005**，避开上游 id 空间） |
 | `app/watchers/providers/docker/Docker.ts` | 监控判定改为三优先级，新增 `discoverContainers()` |
 | `Dockerfile` | 与上游一致（UI 构建阶段沿用 `npm ci`），本分支不再修改 |
 | `ui/src/views/*`、`ui/src/components/*` | 共 30 个界面文件，硬编码文案改为 `$t()` |
