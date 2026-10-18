@@ -1,3 +1,4 @@
+import os from 'os';
 import Component, { ComponentConfiguration } from '../../registry/Component';
 import * as event from '../../event';
 import { getTriggerCounter } from '../../prometheus/trigger';
@@ -61,10 +62,29 @@ export interface RollbackReport {
     archiveName?: string;
 }
 
-function renderBatch(template: string, containers: Container[]) {
+function renderBatch(template: string, containers: Container[]): string {
     // Set deprecated vars for backward compatibility
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const count = containers ? containers.length : 0;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const hostname = process.env.WUD_LOG_HOSTNAME || os.hostname();
+    const watchers = containers
+        ? Array.from(
+              new Set(
+                  containers
+                      .map((c) => c.watcher)
+                      .filter(
+                          (w): w is string =>
+                              typeof w === 'string' && w.length > 0,
+                      ),
+              ),
+          )
+        : [];
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const watcher =
+        watchers.length === 1
+            ? watchers[0]
+            : (containers && containers[0]?.watcher) || '';
 
     return eval('`' + template + '`');
 }
@@ -93,14 +113,15 @@ class Trigger extends Component {
      */
     static isThresholdReached(containerResult: Container, threshold: string) {
         let thresholdPassing = true;
+        const normalizedThreshold = threshold.toLowerCase();
         if (
-            threshold.toLowerCase() !== 'all' &&
+            normalizedThreshold !== 'all' &&
             containerResult.updateKind &&
             containerResult.updateKind.kind === 'tag' &&
             containerResult.updateKind.semverDiff &&
             containerResult.updateKind.semverDiff !== 'unknown'
         ) {
-            switch (threshold) {
+            switch (normalizedThreshold) {
                 case 'major-only':
                     thresholdPassing =
                         containerResult.updateKind.semverDiff == 'major';
@@ -108,6 +129,13 @@ class Trigger extends Component {
                 case 'minor-only':
                     thresholdPassing =
                         containerResult.updateKind.semverDiff == 'minor';
+                    break;
+                case 'patch-only':
+                    thresholdPassing =
+                        containerResult.updateKind.semverDiff == 'patch';
+                    break;
+                case 'major':
+                    thresholdPassing = true;
                     break;
                 case 'minor':
                     thresholdPassing =
@@ -126,6 +154,46 @@ class Trigger extends Component {
     }
 
     /**
+     * Return true if update reaches trigger exclusion threshold.
+     * @param containerResult
+     * @param threshold
+     * @returns {boolean}
+     */
+    static isExcludeThresholdReached(
+        containerResult: Partial<Container>,
+        threshold: string,
+    ): boolean {
+        const normalizedThreshold = threshold.toLowerCase();
+        if (normalizedThreshold === 'all') {
+            return true;
+        }
+        if (
+            !containerResult.updateKind ||
+            containerResult.updateKind.kind !== 'tag' ||
+            !containerResult.updateKind.semverDiff ||
+            containerResult.updateKind.semverDiff === 'unknown'
+        ) {
+            return false;
+        }
+        const diff = containerResult.updateKind.semverDiff;
+        switch (normalizedThreshold) {
+            case 'major':
+            case 'major-only':
+                return diff === 'major';
+            case 'minor-only':
+                return diff === 'minor';
+            case 'minor':
+                return diff === 'major' || diff === 'minor';
+            case 'patch':
+                return diff === 'major' || diff === 'minor' || diff === 'patch';
+            case 'patch-only':
+                return diff === 'patch';
+            default:
+                return true;
+        }
+    }
+
+    /**
      * Parse $name:$threshold string.
      * @param {*} includeOrExcludeTriggerString
      * @returns
@@ -140,12 +208,15 @@ class Trigger extends Component {
             threshold: 'all',
         };
         if (includeOrExcludeTriggerSplit.length === 2) {
-            switch (includeOrExcludeTriggerSplit[1]) {
+            switch (includeOrExcludeTriggerSplit[1].toLowerCase()) {
                 case 'major-only':
                     includeOrExcludeTrigger.threshold = 'major-only';
                     break;
                 case 'minor-only':
                     includeOrExcludeTrigger.threshold = 'minor-only';
+                    break;
+                case 'patch-only':
+                    includeOrExcludeTrigger.threshold = 'patch-only';
                     break;
                 case 'major':
                     includeOrExcludeTrigger.threshold = 'major';
@@ -390,9 +461,21 @@ class Trigger extends Component {
         if (!triggerExclude) {
             return false;
         }
-        return this.isTriggerIncludedOrExcluded(
+        const triggers = triggerExclude
+            .split(/\s*,\s*/)
+            .map((triggerToMatch) =>
+                Trigger.parseIncludeOrIncludeTriggerString(triggerToMatch),
+            );
+        const triggerMatched = triggers.find(
+            (triggerToMatch) =>
+                triggerToMatch.id.toLowerCase() === this.getId(),
+        );
+        if (!triggerMatched) {
+            return false;
+        }
+        return Trigger.isExcludeThresholdReached(
             containerResult,
-            triggerExclude,
+            triggerMatched.threshold.toLowerCase(),
         );
     }
 
@@ -701,6 +784,8 @@ class Trigger extends Component {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const watcher = container.watcher;
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const hostname = process.env.WUD_LOG_HOSTNAME || os.hostname();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const kind =
             container.updateKind && container.updateKind.kind
                 ? container.updateKind.kind
@@ -722,9 +807,7 @@ class Trigger extends Component {
                 : '';
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const link =
-            container.result && container.result.link
-                ? container.result.link
-                : '';
+            (container.result && container.result.link) || container.link || '';
 
         return eval('`' + template + '`');
     }
@@ -748,12 +831,22 @@ class Trigger extends Component {
     }
 
     /**
+     * Render trigger batch template.
+     * @param template
+     * @param containers
+     * @returns {*}
+     */
+    renderBatch(template: string, containers: Container[]): string {
+        return renderBatch(template, containers);
+    }
+
+    /**
      * Render trigger title batch.
      * @param containers
      * @returns {*}
      */
     renderBatchTitle(containers: Container[]) {
-        return renderBatch(this.configuration.batchtitle!, containers);
+        return this.renderBatch(this.configuration.batchtitle!, containers);
     }
 
     /**

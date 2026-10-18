@@ -6,6 +6,8 @@ import Docker, {
     reconcileCmd,
     reconcileEntrypoint,
     createPullProgressLogger,
+    isPullRateLimited,
+    getPullRetryAfterMs,
 } from './Docker';
 import { HookManager } from '../../hooks/HookManager';
 import log from '../../../log';
@@ -120,6 +122,8 @@ jest.mock('../../../registry', () => ({
             registry: {
                 hub: {
                     getAuthPull: async () => undefined,
+                    withPullPermit: (pull) => pull(),
+                    deferPulls: () => undefined,
                     getImageFullName: (image, tagOrDigest) =>
                         `${image.registry.url}/${image.name}:${tagOrDigest}`,
                 },
@@ -1152,6 +1156,130 @@ describe('cloneContainer with image reconciliation', () => {
         expect(clone.Cmd).toEqual(baseContainer.Config.Cmd);
         expect(clone.Entrypoint).toEqual(baseContainer.Config.Entrypoint);
     });
+
+    describe('Docker Compose label synchronization (#1422)', () => {
+        test('should update com.docker.compose.image to newImageSpec.Id when present', () => {
+            const composeContainer = {
+                ...baseContainer,
+                Config: {
+                    ...baseContainer.Config,
+                    Labels: {
+                        'com.docker.compose.project': 'my-project',
+                        'com.docker.compose.service': 'web',
+                        'com.docker.compose.image': 'sha256:oldimageid123456',
+                        'com.docker.compose.config-hash': 'abcde12345hash',
+                    },
+                },
+            };
+            const oldImageSpec = {
+                Id: 'sha256:oldimageid123456',
+                Config: {
+                    Labels: {},
+                },
+            };
+            const newImageSpec = {
+                Id: 'sha256:newimageid789012',
+                Config: {
+                    Labels: {},
+                },
+            };
+
+            const clone = docker.cloneContainer(
+                composeContainer as any,
+                'my-app:2.0.0',
+                oldImageSpec as any,
+                newImageSpec as any,
+            );
+
+            expect(clone.Labels).toBeDefined();
+            expect(clone.Labels?.['com.docker.compose.image']).toEqual(
+                'sha256:newimageid789012',
+            );
+            expect(clone.Labels?.['com.docker.compose.config-hash']).toEqual(
+                'abcde12345hash',
+            );
+            expect(clone.Labels?.['com.docker.compose.project']).toEqual(
+                'my-project',
+            );
+            expect(clone.Labels?.['com.docker.compose.service']).toEqual('web');
+        });
+
+        test('should preserve other compose labels such as config-hash and service name', () => {
+            const composeContainer = {
+                ...baseContainer,
+                Config: {
+                    ...baseContainer.Config,
+                    Labels: {
+                        'com.docker.compose.config-hash': 'cfghash98765',
+                        'com.docker.compose.container-number': '1',
+                        'com.docker.compose.oneoff': 'False',
+                        'com.docker.compose.project': 'stack',
+                        'com.docker.compose.service': 'app',
+                        'com.docker.compose.version': '2.24.0',
+                        'com.docker.compose.image': 'sha256:old111',
+                    },
+                },
+            };
+            const newImageSpec = {
+                Id: 'sha256:new222',
+                Config: {
+                    Labels: {},
+                },
+            };
+
+            const clone = docker.cloneContainer(
+                composeContainer as any,
+                'my-app:2.0.0',
+                undefined,
+                newImageSpec as any,
+            );
+
+            expect(clone.Labels?.['com.docker.compose.image']).toEqual(
+                'sha256:new222',
+            );
+            expect(clone.Labels?.['com.docker.compose.config-hash']).toEqual(
+                'cfghash98765',
+            );
+            expect(clone.Labels?.['com.docker.compose.project']).toEqual(
+                'stack',
+            );
+            expect(clone.Labels?.['com.docker.compose.service']).toEqual('app');
+        });
+
+        test('should leave normal containers without compose labels unaffected', () => {
+            const normalContainer = {
+                ...baseContainer,
+                Config: {
+                    ...baseContainer.Config,
+                    Labels: {
+                        'app.version': '1.0.0',
+                        maintainer: 'dev@example.com',
+                    },
+                },
+            };
+            const newImageSpec = {
+                Id: 'sha256:newimageid789012',
+                Config: {
+                    Labels: {
+                        'app.version': '2.0.0',
+                    },
+                },
+            };
+
+            const clone = docker.cloneContainer(
+                normalContainer as any,
+                'my-app:2.0.0',
+                undefined,
+                newImageSpec as any,
+            );
+
+            expect(clone.Labels).toEqual({
+                'app.version': '1.0.0',
+                maintainer: 'dev@example.com',
+            });
+            expect(clone.Labels?.['com.docker.compose.image']).toBeUndefined();
+        });
+    });
 });
 
 test('trigger should not throw when all is ok', async () => {
@@ -1723,13 +1851,34 @@ test('trigger should refuse to replace the container WUD runs in by default', as
         .mockResolvedValue('123456798');
 
     await expect(docker.trigger(selfContainer)).rejects.toThrow(
-        /Refusing to update the container WUD runs in/,
+        'Refusing to update the container WUD runs in: stopping it would abort the update and leave the container down. Enable it with WUD_TRIGGER_DOCKER_{trigger_name}_SELFUPDATE=true, or exclude WUD from this trigger with the wud.trigger.exclude label and update it externally.',
     );
 
     // The whole point: the container must not be touched.
     expect(stop).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
 
+    watcherSpy.mockRestore();
+    selfSpy.mockRestore();
+});
+
+test('trigger should format error message with trigger type when selfupdate is disabled', async () => {
+    const { dockerApi } = buildSelfUpdateDockerApi();
+    const watcherSpy = jest.spyOn(docker, 'getWatcher').mockReturnValue({
+        dockerApi,
+        configuration: { socket: '/var/run/docker.sock' },
+    });
+    const selfSpy = jest
+        .spyOn(docker, 'resolveSelfContainerId')
+        .mockResolvedValue('123456798');
+    const originalType = docker.type;
+    docker.type = 'custom';
+
+    await expect(docker.trigger(selfContainer)).rejects.toThrow(
+        'Refusing to update the container WUD runs in: stopping it would abort the update and leave the container down. Enable it with WUD_TRIGGER_CUSTOM_{trigger_name}_SELFUPDATE=true, or exclude WUD from this trigger with the wud.trigger.exclude label and update it externally.',
+    );
+
+    docker.type = originalType;
     watcherSpy.mockRestore();
     selfSpy.mockRestore();
 });
@@ -2517,5 +2666,218 @@ describe('Docker 29 containerd store & fully qualified image (#1081)', () => {
                 'docker.io/library/nginx:1.31.2',
             );
         });
+    });
+});
+
+describe('pull rate limiting', () => {
+    const ghcrRateLimit = () =>
+        new Error(
+            'toomanyrequests: retry-after: 267.922µs, allowed: 44000/minute',
+        );
+    const fakeRegistry = () => ({
+        withPullPermit: jest.fn((pull) => pull()),
+        deferPulls: jest.fn(),
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
+    test('isPullRateLimited should recognize 429s from the daemon and the pull stream', () => {
+        expect(isPullRateLimited({ statusCode: 429, message: 'x' })).toBe(true);
+        expect(isPullRateLimited(ghcrRateLimit())).toBe(true);
+        expect(
+            isPullRateLimited(
+                new Error('(HTTP code 429) unexpected - toomanyrequests'),
+            ),
+        ).toBe(true);
+        expect(isPullRateLimited(new Error('manifest unknown'))).toBe(false);
+        expect(
+            isPullRateLimited(
+                new Error('manifest for test/test:1.429 not found'),
+            ),
+        ).toBe(false);
+        expect(isPullRateLimited(undefined)).toBe(false);
+    });
+
+    test('getPullRetryAfterMs should read the retry-after in the message', () => {
+        expect(getPullRetryAfterMs(ghcrRateLimit())).toBeCloseTo(0.267922);
+        expect(
+            getPullRetryAfterMs(
+                new Error('toomanyrequests: retry-after: 250ms'),
+            ),
+        ).toBe(250);
+        expect(
+            getPullRetryAfterMs(new Error('toomanyrequests: retry-after: 3s')),
+        ).toBe(3000);
+        expect(
+            getPullRetryAfterMs(new Error('toomanyrequests: retry-after: 5')),
+        ).toBe(5000);
+        expect(getPullRetryAfterMs(new Error('toomanyrequests'))).toBe(
+            undefined,
+        );
+    });
+
+    test('pullImage should queue the pull with the registry', async () => {
+        const registry = fakeRegistry();
+        const pullImageOnce = jest
+            .spyOn(docker, 'pullImageOnce')
+            .mockResolvedValue(undefined);
+
+        await docker.pullImage({}, undefined, 'test/test:1.2.3', log, registry);
+
+        expect(registry.withPullPermit).toHaveBeenCalledTimes(1);
+        expect(pullImageOnce).toHaveBeenCalledWith(
+            {},
+            undefined,
+            'test/test:1.2.3',
+            log,
+        );
+        expect(registry.deferPulls).not.toHaveBeenCalled();
+    });
+
+    test('pullImage should defer the registry and retry a rate-limited pull', async () => {
+        const registry = fakeRegistry();
+        jest.spyOn(Math, 'random').mockReturnValue(0.5);
+        const pullImageOnce = jest
+            .spyOn(docker, 'pullImageOnce')
+            .mockRejectedValueOnce(ghcrRateLimit())
+            .mockRejectedValueOnce({ statusCode: 429, message: 'HTTP 429' })
+            .mockResolvedValueOnce(undefined);
+
+        await expect(
+            docker.pullImage({}, undefined, 'test/test:1.2.3', log, registry),
+        ).resolves.toBeUndefined();
+
+        expect(pullImageOnce).toHaveBeenCalledTimes(3);
+        // GHCR's microsecond retry-after is only a floor under the backoff.
+        expect(registry.deferPulls.mock.calls.map(([delay]) => delay)).toEqual([
+            1500, 3000,
+        ]);
+    });
+
+    test('pullImage should give up after three retries with the original error', async () => {
+        const registry = fakeRegistry();
+        const error = ghcrRateLimit();
+        const pullImageOnce = jest
+            .spyOn(docker, 'pullImageOnce')
+            .mockRejectedValue(error);
+
+        await expect(
+            docker.pullImage({}, undefined, 'test/test:1.2.3', log, registry),
+        ).rejects.toBe(error);
+
+        expect(pullImageOnce).toHaveBeenCalledTimes(4);
+        expect(registry.deferPulls).toHaveBeenCalledTimes(3);
+    });
+
+    test('pullImage should not retry other errors or a retry-after over one minute', async () => {
+        const registry = fakeRegistry();
+        const notFound = new Error('manifest unknown');
+        const pullImageOnce = jest
+            .spyOn(docker, 'pullImageOnce')
+            .mockRejectedValueOnce(notFound);
+
+        await expect(
+            docker.pullImage({}, undefined, 'test/test:1.2.3', log, registry),
+        ).rejects.toBe(notFound);
+
+        const longWait = new Error('toomanyrequests: retry-after: 120s');
+        pullImageOnce.mockRejectedValueOnce(longWait);
+        await expect(
+            docker.pullImage({}, undefined, 'test/test:1.2.3', log, registry),
+        ).rejects.toBe(longWait);
+
+        expect(pullImageOnce).toHaveBeenCalledTimes(2);
+        expect(registry.deferPulls).not.toHaveBeenCalled();
+    });
+
+    test('pullImage without a registry should pull directly', async () => {
+        const pullImageOnce = jest
+            .spyOn(docker, 'pullImageOnce')
+            .mockResolvedValue(undefined);
+
+        await docker.pullImage({}, undefined, 'test/test:1.2.3', log);
+
+        expect(pullImageOnce).toHaveBeenCalledTimes(1);
+    });
+
+    test('pullImage should defer queued pulls before releasing the permit on rate limit', async () => {
+        const events = [];
+        const pending = [];
+        let active = 0;
+        let resolveQueueCheck;
+        const secondQueued = new Promise((resolve) => {
+            resolveQueueCheck = resolve;
+        });
+
+        const registry = {
+            withPullPermit: jest.fn(async (pull) => {
+                if (active >= 1) {
+                    await new Promise((resolve) => {
+                        pending.push(resolve);
+                        resolveQueueCheck();
+                    });
+                } else {
+                    active += 1;
+                }
+                try {
+                    return await pull();
+                } finally {
+                    const next = pending.shift();
+                    if (next) {
+                        next();
+                    } else {
+                        active -= 1;
+                    }
+                }
+            }),
+            deferPulls: jest.fn((delay) => {
+                events.push(`deferPulls:${delay}`);
+            }),
+        };
+
+        jest.spyOn(Math, 'random').mockReturnValue(0.5);
+        let pull1Attempts = 0;
+        const pullImageOnce = jest
+            .spyOn(docker, 'pullImageOnce')
+            .mockImplementation(async (_api, _auth, image) => {
+                if (image === 'image1') {
+                    pull1Attempts += 1;
+                    if (pull1Attempts === 1) {
+                        await secondQueued;
+                        throw ghcrRateLimit();
+                    }
+                    events.push('pull1Retried');
+                    return;
+                }
+                if (image === 'image2') {
+                    events.push('pull2Started');
+                    expect(registry.deferPulls).toHaveBeenCalledWith(1500);
+                    return;
+                }
+            });
+
+        const pull1Promise = docker.pullImage(
+            {},
+            undefined,
+            'image1',
+            log,
+            registry,
+        );
+        const pull2Promise = docker.pullImage(
+            {},
+            undefined,
+            'image2',
+            log,
+            registry,
+        );
+
+        await Promise.all([pull1Promise, pull2Promise]);
+
+        expect(pullImageOnce).toHaveBeenCalledTimes(3);
+        expect(events[0]).toBe('deferPulls:1500');
+        expect(events[1]).toBe('pull2Started');
+        expect(events[2]).toBe('pull1Retried');
     });
 });

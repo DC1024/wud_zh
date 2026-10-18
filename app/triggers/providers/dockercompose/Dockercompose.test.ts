@@ -14,6 +14,9 @@ jest.mock('../../../registry', () => ({
         return {
             registry: {
                 hub: {
+                    getAuthPull: async () => undefined,
+                    withPullPermit: (pull: any) => pull(),
+                    deferPulls: () => undefined,
                     getImageFullName: (
                         image: { name: string },
                         tagOrDigest: string,
@@ -660,6 +663,151 @@ describe('Dockercompose Trigger - file operations', () => {
         superTriggerSpy.mockRestore();
     });
 
+    describe('Digest-only updates for floating tags (#1404)', () => {
+        const currentDigest = `sha256:${'1'.repeat(64)}`;
+        const remoteDigest = `sha256:${'2'.repeat(64)}`;
+        const digestContainer = {
+            ...container,
+            labels: { 'com.docker.compose.service': 'test' },
+            image: {
+                ...container.image,
+                tag: { value: 'latest', semver: false },
+                digest: { value: currentDigest, watch: true },
+            },
+            updateKind: {
+                kind: 'digest',
+                localValue: currentDigest,
+                remoteValue: remoteDigest,
+            },
+            result: { digest: remoteDigest },
+        };
+        let digestTrigger: Dockercompose;
+        let composeYaml: string;
+        let superTriggerSpy: jest.SpyInstance;
+
+        beforeEach(() => {
+            digestTrigger = new Dockercompose();
+            digestTrigger.configuration = {
+                ...configurationValid,
+                auto: false,
+                dryrun: false,
+            };
+            composeYaml = [
+                '# Floating tags must remain unpinned',
+                'services:',
+                '  test:',
+                '    image: "test/test:latest"',
+                '  sibling:',
+                '    image: "test/test:latest"',
+                '',
+            ].join('\n');
+            (fs.access as jest.Mock).mockResolvedValue(undefined);
+            (fs.readFile as jest.Mock).mockImplementation(async () =>
+                Buffer.from(composeYaml),
+            );
+            (fs.writeFile as jest.Mock).mockResolvedValue(undefined);
+            digestTrigger.getWatcher = jest.fn().mockReturnValue({
+                dockerApi: { modem: { socketPath: '/var/run/docker.sock' } },
+            });
+            superTriggerSpy = jest
+                .spyOn(
+                    Object.getPrototypeOf(Dockercompose.prototype),
+                    'trigger',
+                )
+                .mockResolvedValue(undefined);
+        });
+
+        afterEach(() => {
+            superTriggerSpy.mockRestore();
+        });
+
+        test.each(['latest', 'stable'])(
+            'should apply a manual digest update for :%s without pinning or updating sibling services',
+            async (tag) => {
+                composeYaml = composeYaml.replaceAll(':latest', `:${tag}`);
+                const testContainer = {
+                    ...digestContainer,
+                    image: {
+                        ...digestContainer.image,
+                        tag: { value: tag, semver: false },
+                    },
+                };
+                const sibling = {
+                    ...testContainer,
+                    labels: { 'com.docker.compose.service': 'sibling' },
+                    updateAvailable: false,
+                };
+
+                await digestTrigger.triggerBatch([testContainer, sibling]);
+
+                expect(superTriggerSpy).toHaveBeenCalledTimes(1);
+                expect(superTriggerSpy).toHaveBeenCalledWith(testContainer, {
+                    runHooks: false,
+                });
+                expect(fs.writeFile).toHaveBeenCalledTimes(1);
+                expect(fs.writeFile).toHaveBeenCalledWith(
+                    configurationValid.file,
+                    composeYaml,
+                );
+            },
+        );
+
+        test.each([
+            { kind: 'digest', remoteValue: currentDigest },
+            { kind: 'digest', remoteValue: undefined },
+            { kind: 'digest', remoteValue: '' },
+            { kind: 'tag', remoteValue: 'latest' },
+        ])(
+            'should skip an unchanged image with updateKind %j',
+            async (update) => {
+                const testContainer = {
+                    ...digestContainer,
+                    updateKind: {
+                        localValue:
+                            update.kind === 'tag' ? 'latest' : currentDigest,
+                        ...update,
+                    },
+                    result: {},
+                };
+
+                await digestTrigger.triggerBatch([testContainer]);
+
+                expect(superTriggerSpy).not.toHaveBeenCalled();
+                expect(fs.writeFile).not.toHaveBeenCalled();
+            },
+        );
+
+        test('should resolve a digest update from result.digest when remoteValue is missing', async () => {
+            const testContainer = {
+                ...digestContainer,
+                updateKind: {
+                    kind: 'digest',
+                    localValue: currentDigest,
+                },
+            };
+
+            await digestTrigger.triggerBatch([testContainer]);
+
+            expect(superTriggerSpy).toHaveBeenCalledWith(testContainer, {
+                runHooks: false,
+            });
+            expect(fs.writeFile).toHaveBeenCalled();
+        });
+
+        test('dry-run should not write or back up the compose file for a digest update', async () => {
+            digestTrigger.configuration.dryrun = true;
+            digestTrigger.configuration.backup = true;
+
+            await digestTrigger.triggerBatch([digestContainer]);
+
+            expect(superTriggerSpy).toHaveBeenCalledWith(digestContainer, {
+                runHooks: false,
+            });
+            expect(fs.writeFile).not.toHaveBeenCalled();
+            expect(fs.copyFile).not.toHaveBeenCalled();
+        });
+    });
+
     describe('Services sharing identical images (#1323)', () => {
         const sharedCompose = {
             services: {
@@ -1264,6 +1412,262 @@ services:
                 );
                 expect(result).toContain('restart: always');
             });
+        });
+
+        describe('preserve YAML formatting (#1409)', () => {
+            test('should preserve 0-indent lists, flow arrays, and comments exactly', () => {
+                const composeYaml = `# Global stack header
+version: "3.8"
+
+services:
+  # Web frontend
+  web:
+    image: nginx:1.20 # Main web server
+    ports:
+    - 80:80
+    - 443:443
+    environment: [ FOO=BAR, BAZ=QUX ]
+`;
+                const updates = [
+                    {
+                        service: 'web',
+                        current: 'nginx:1.20',
+                        update: 'nginx:1.21',
+                    },
+                ];
+
+                const expected = `# Global stack header
+version: "3.8"
+
+services:
+  # Web frontend
+  web:
+    image: nginx:1.21 # Main web server
+    ports:
+    - 80:80
+    - 443:443
+    environment: [ FOO=BAR, BAZ=QUX ]
+`;
+                const result = dockercompose.updateComposeYaml(
+                    composeYaml,
+                    updates,
+                );
+                expect(result).toBe(expected);
+            });
+
+            test('should preserve quoting styles (double, single, unquoted) across services', () => {
+                const composeYaml = `services:
+  web:
+    image: "nginx:1.20"
+  db:
+    image: 'postgres:14'
+  cache:
+    image: redis:6-alpine
+`;
+                const updates = [
+                    {
+                        service: 'web',
+                        current: 'nginx:1.20',
+                        update: 'nginx:1.21',
+                    },
+                    {
+                        service: 'db',
+                        current: 'postgres:14',
+                        update: 'postgres:15',
+                    },
+                    {
+                        service: 'cache',
+                        current: 'redis:6-alpine',
+                        update: 'redis:7-alpine',
+                    },
+                ];
+
+                const expected = `services:
+  web:
+    image: "nginx:1.21"
+  db:
+    image: 'postgres:15'
+  cache:
+    image: redis:7-alpine
+`;
+                const result = dockercompose.updateComposeYaml(
+                    composeYaml,
+                    updates,
+                );
+                expect(result).toBe(expected);
+            });
+
+            test('should not collide when one service image is a prefix of another', () => {
+                const composeYaml = `services:
+  api:
+    image: myrepo/app:1.0.0
+  worker:
+    image: myrepo/app:1.0.0-worker
+`;
+                const updates = [
+                    {
+                        service: 'api',
+                        current: 'myrepo/app:1.0.0',
+                        update: 'myrepo/app:2.0.0',
+                    },
+                ];
+
+                const expected = `services:
+  api:
+    image: myrepo/app:2.0.0
+  worker:
+    image: myrepo/app:1.0.0-worker
+`;
+                const result = dockercompose.updateComposeYaml(
+                    composeYaml,
+                    updates,
+                );
+                expect(result).toBe(expected);
+            });
+
+            test('should update compose file when service is omitted by matching current image', () => {
+                const composeYaml = `services:
+  web:
+    image: app:1.0.0
+    restart: always
+`;
+                const updates = [
+                    {
+                        current: 'app:1.0.0',
+                        update: 'app:2.0.0',
+                    },
+                ];
+
+                const expected = `services:
+  web:
+    image: app:2.0.0
+    restart: always
+`;
+                const result = dockercompose.updateComposeYaml(
+                    composeYaml,
+                    updates,
+                );
+                expect(result).toBe(expected);
+            });
+
+            test('should fallback to doc.setIn when service exists without an image scalar node', () => {
+                const composeYaml = `services:
+  web:
+    build: .
+    restart: always
+`;
+                const updates = [
+                    {
+                        service: 'web',
+                        update: 'web:1.0.0',
+                    },
+                ];
+
+                const result = dockercompose.updateComposeYaml(
+                    composeYaml,
+                    updates,
+                );
+                expect(result).toContain('image: web:1.0.0');
+                expect(result).toContain('build: .');
+            });
+
+            test('rewriteComposeFile should use updateComposeYaml and preserve file formatting', async () => {
+                const originalYaml = `# Compose file with custom formatting
+services:
+  web:
+    image: nginx:1.20 # web comment
+    ports:
+    - 80:80
+`;
+                (fs.readFile as jest.Mock).mockResolvedValue(
+                    Buffer.from(originalYaml),
+                );
+                (fs.writeFile as jest.Mock).mockResolvedValue(undefined);
+
+                await dockercompose.rewriteComposeFile('docker-compose.yml', [
+                    {
+                        service: 'web',
+                        current: 'nginx:1.20',
+                        update: 'nginx:1.21',
+                    },
+                ]);
+
+                const expectedYaml = `# Compose file with custom formatting
+services:
+  web:
+    image: nginx:1.21 # web comment
+    ports:
+    - 80:80
+`;
+                expect(fs.writeFile).toHaveBeenCalledWith(
+                    'docker-compose.yml',
+                    expectedYaml,
+                );
+            });
+        });
+    });
+
+    describe('selfupdate', () => {
+        test('should refuse to update the container WUD runs in when selfupdate is disabled', async () => {
+            const stop = jest.fn();
+            const remove = jest.fn();
+            const createContainer = jest.fn();
+            const dockerApi = {
+                createContainer,
+                pull: () => Promise.resolve(),
+                modem: {
+                    followProgress: (_pullStream: any, res: any) => res(),
+                },
+                getContainer: () =>
+                    Promise.resolve({
+                        inspect: () =>
+                            Promise.resolve({
+                                Name: '/wud',
+                                Id: '123456798',
+                                Image: 'sha256:currentimage',
+                                State: { Running: true },
+                                Config: { Hostname: '123456798' },
+                                HostConfig: {},
+                                NetworkSettings: { Networks: {} },
+                            }),
+                        stop,
+                        remove,
+                        start: () => Promise.resolve(),
+                    }),
+            };
+            const watcherSpy = jest
+                .spyOn(dockercompose, 'getWatcher')
+                .mockReturnValue({
+                    dockerApi,
+                    configuration: { socket: '/var/run/docker.sock' },
+                } as any);
+            const selfSpy = jest
+                .spyOn(dockercompose, 'resolveSelfContainerId')
+                .mockResolvedValue('123456798');
+
+            const selfContainer = {
+                updateAvailable: true,
+                watcher: 'test',
+                id: '123456789',
+                name: 'wud',
+                image: {
+                    name: 'getwud/wud',
+                    registry: { name: 'hub', url: 'my-registry' },
+                },
+                updateKind: { kind: 'tag', remoteValue: '9.0.3' },
+            };
+
+            await expect(
+                dockercompose.performUpdate(selfContainer as any),
+            ).rejects.toThrow(
+                'Refusing to update the container WUD runs in: stopping it would abort the update and leave the container down. Enable it with WUD_TRIGGER_DOCKERCOMPOSE_{trigger_name}_SELFUPDATE=true, or exclude WUD from this trigger with the wud.trigger.exclude label and update it externally.',
+            );
+
+            expect(stop).not.toHaveBeenCalled();
+            expect(remove).not.toHaveBeenCalled();
+
+            watcherSpy.mockRestore();
+            selfSpy.mockRestore();
         });
     });
 });
