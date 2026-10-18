@@ -108,8 +108,8 @@ Docker Compose 同理，只改一行：
 | 文件 | 作用 |
 |---|---|
 | `ui/src/i18n/index.ts` | i18n 入口：默认语言、读写 `wud-lang`、导出 `currentLocale` / `setLocale()`、同步 `<html lang>` |
-| `ui/src/i18n/zh-CN.ts` | 简体中文消息包（17 个命名空间 / 364 条） |
-| `ui/src/i18n/en.ts` | 英文消息包（与中文包键位对称，364 条） |
+| `ui/src/i18n/zh-CN.ts` | 简体中文消息包（23 个命名空间 / 502 条） |
+| `ui/src/i18n/en.ts` | 英文消息包（与中文包键位对称，502 条） |
 | `ui/src/views/WatchlistView.vue` | 监控清单页面（列表 + 勾选 + 来源标识 + 待生效提示） |
 | `ui/src/components/HubMirrorsEditor.vue` | Docker Hub 镜像源列表编辑器（增删排序 + 连通性探测） |
 | `ui/src/services/mock/data/discovered.ts` | 监控清单页的演示数据（复刻三态语义） |
@@ -133,24 +133,22 @@ Docker Compose 同理，只改一行：
 | `app/api/container.ts` | 新增 `GET /api/containers/discover`（列出全部容器，含未监控）与 `PUT /api/containers/watch-preference`（设置/清除偏好） |
 | `app/store/db/migrations.ts`、`app/store/db/schema.ts` | 新增 `watched_containers` 表（迁移 id=5） |
 | `app/watchers/providers/docker/Docker.ts` | 监控判定改为三优先级，新增 `discoverContainers()` |
-| `Dockerfile` | UI 构建阶段 `npm ci` → `npm install`（`package-lock.json` 未包含新依赖） |
-| `ui/src/views/*`、`ui/src/components/*` | 共 17 个界面文件，硬编码文案改为 `$t()` |
+| `Dockerfile` | 与上游一致（UI 构建阶段沿用 `npm ci`），本分支不再修改 |
+| `ui/src/views/*`、`ui/src/components/*` | 共 30 个界面文件，硬编码文案改为 `$t()` |
 | `app/registries/providers/hub/Hub.ts` | **Docker Hub 镜像源可配置**：`url`/`authurl`/`service` 改为可经环境变量覆盖；默认字节级保持原生 `registry-1.docker.io`，存量部署零影响 |
 | `app/registries/providers/hub/Hub.test.ts` | 新增 3 个镜像源配置用例（匿名镜像站 / 认证镜像站 / 镜像名去 host 前缀），共 27 用例通过 |
 
 **已汉化的界面**
 
-- 导航侧边栏、顶部栏、登录页
+- 导航侧边栏、顶部栏、登录页（含 OIDC 登录与密码可见性开关）
 - 首页仪表盘（容器数 / 触发器 / 监视器 / 镜像仓库统计）
 - 容器列表（含筛选、分组、暂缓更新、删除确认等弹窗）
 - 容器详情抽屉全部子页：更新、触发器、镜像、容器信息、错误
-- 配置页：触发器、监视器、服务器与系统配置
+- 配置页：触发器、监视器、服务器与系统配置、镜像仓库、认证方式、用户管理
 - **监控清单（本分支新增页面）**：容器选择、来源标识、待生效提示
+- 个人资料（含 API 令牌全流程）、日志、触发器测试弹窗、默认页脚
 
-**仍保留英文的页面**（上游次要页面，尚未翻译）
-
-日志（Logs）、个人资料（Profile）、镜像仓库（Registries）、认证（Authentications）、用户（Users）、状态（State）。
-> 这些页面功能完全正常，只是文案还是英文。欢迎按下面的方式补充翻译。
+> 已无"保留英文"的页面；`node ui/scripts/check-i18n-hardcoded.cjs` 会扫描全部 `.vue`，CI 在 Lint 阶段强制执行。
 
 ### 🎛 监控清单：在网页上勾选要监控哪些容器
 
@@ -219,11 +217,11 @@ services:
 
 | 分类 | 条数 | 说明 |
 |---|---|---|
-| 上游已有界面 | 227 | 其中 **211 条逐字一致**（93%） |
-| 本分支新增界面 | 137 | 监控清单 54 / 服务器管理 55 / 镜像源 28 |
-| 合计 | 364 | 中英两份消息包各 364 条，键位完全对称 |
+| 上游已有文案 | 375 | **375 条逐字一致（100%）** |
+| 本分支新增/改写 | 127 | 新页面 109（监控清单 41 / 服务器 47 / 镜像源 21）+ 既有页面新增入口 17 + 已知偏差 1 |
+| 合计 | 502 | 中英两份消息包各 502 条，键位完全对称 |
 
-差集 16 条已逐条核对：1 条是 HTML 实体写法差异（上游源码写 `&amp;`，消息包里是 `&`，渲染等价），14 条是挂在既有页面上的新入口文案（监控清单入口、语言切换、已知未监控区块），**1 条是真偏差**——首页的 `home.updatesAvailable` 丢了上游的复数 `s`（上游是 `update{{ n > 1 ? 's' : '' }}`，目前恒为单数），待修。
+那 18 条非新页面的差异已逐条核对：17 条是挂在既有页面上的新入口文案（监控清单入口、语言切换、条目计数等），**1 条是真偏差**——首页的 `home.updatesAvailable` 丢了上游的复数 `s`（上游是 `update{{ n > 1 ? 's' : '' }}`，目前恒为单数），待修。
 
 为此还修正过 4 处汉化过程中产生的偏差，例如：登录按钮应还原为上游的 `Login`、复制提示需保留上游 `xxx copied to clipboard` 的类别前缀、暂缓弹窗正文应为 `Snooze update for <名称>:`。
 
@@ -238,7 +236,7 @@ services:
 ### 📦 镜像构建与发布
 
 - 由 GitHub Actions 在 push `i18n-zh` 时自动构建（约 1~3 分钟），推送到 GHCR，标签为 `latest` 与 `sha-<commit>`
-- 构建时把 `WUD_VERSION` 固定写为 `wud_zh-beta1.4`（见 `.github/workflows/docker-image.yml`），因此界面显示的版本是 `wud_zh-beta1.4`。版本号规则：无新功能则维持，有实质更新则最后一位 +0.1（1.0 → 1.1 → 1.2 → 1.3 → 1.4）
+- 构建时把 `WUD_VERSION` 固定写为 `wud_zh-beta1.5`（见 `.github/workflows/docker-image.yml`），因此界面显示的版本是 `wud_zh-beta1.5`。版本号规则：无新功能则维持，有实质更新则最后一位 +0.1（1.0 → 1.1 → 1.2 → 1.3 → 1.4 → 1.5）
 - 也可在仓库 **Actions → Build and push WUD (zh-CN) image → Run workflow** 手动触发
 - 需要 arm64 等多架构时，在 workflow 的构建步骤加上 `platforms: linux/amd64,linux/arm64`
 

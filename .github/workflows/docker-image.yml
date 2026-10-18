@@ -49,7 +49,7 @@ jobs:
         run: |
           # 显示版本号改为项目名-beta1.x（不再从 app/package.json 派生，避免与上游 semver 混淆）
           # 有实质更新时最后一位 +0.1（1.0 -> 1.1 ...）；本次为阿里云匿名 Bearer 支持
-          echo "value=wud_zh-beta1.4" >> "$GITHUB_OUTPUT"
+          echo "value=wud_zh-beta1.5" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6

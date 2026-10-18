@@ -276,15 +276,15 @@
 
     <div class="stats reveal">
       <div class="stat c-blue">
-        <div class="n" data-count="364">0</div>
+        <div class="n" data-count="502">0</div>
         <div class="l">条界面文案已汉化</div>
       </div>
       <div class="stat c-violet">
-        <div class="n" data-count="17">0</div>
+        <div class="n" data-count="23">0</div>
         <div class="l">个 i18n 命名空间</div>
       </div>
       <div class="stat c-teal">
-        <div class="n" data-count="211">0<small>/227</small></div>
+        <div class="n" data-count="375">0<small>/375</small></div>
         <div class="l">上游界面文案逐字回取</div>
       </div>
       <div class="stat c-amber">
@@ -343,27 +343,27 @@
         <table style="margin-top:12px">
           <thead><tr><th>分类</th><th>条数</th><th>说明</th></tr></thead>
           <tbody>
-            <tr><td class="k">上游已有界面</td><td>227</td><td>其中 <b>211 条逐字一致</b>（93%），差集 16 条见下</td></tr>
-            <tr><td class="k">本分支新增界面</td><td>137</td><td>监控清单 54 / 服务器管理 55 / 镜像源 28 三个新增命名空间</td></tr>
-            <tr><td class="k">合计</td><td>364</td><td>中英两份消息包各 364 条，键位完全对称</td></tr>
+            <tr><td class="k">上游已有文案</td><td>375</td><td><b>375 条逐字一致（100%）</b></td></tr>
+            <tr><td class="k">本分支新增/改写</td><td>127</td><td>新页面 109（监控清单 41 / 服务器 47 / 镜像源 21）+ 既有页面新增入口 17 + 已知偏差 1</td></tr>
+            <tr><td class="k">合计</td><td>502</td><td>中英两份消息包各 502 条，键位完全对称</td></tr>
           </tbody>
         </table>
-        <p style="margin-top:12px" class="muted">那 16 条差集已逐条核对：1 条是 HTML 实体写法差异（上游 <code>&amp;amp;</code>、消息包里 <code>&amp;</code>，渲染等价），14 条是挂在既有页面上的新入口文案（监控清单入口、语言切换、已知未监控区块），<b>1 条是真偏差</b>——首页的复数句丢了上游的 <code>s</code>，已在仓库待办里记着。</p>
+        <p style="margin-top:12px" class="muted">那 18 条非新页面的差异已逐条核对：17 条是挂在既有页面上的新入口文案（监控清单入口、语言切换、条目计数等），<b>1 条是真偏差</b>——首页的复数句丢了上游的 <code>s</code>，已在仓库待办里记着。</p>
         <p style="margin-top:12px" class="muted">汉化过程中还回修了 4 处偏差，例如登录按钮必须还原成上游的 <code>Login</code>、复制提示要保留 <code>xxx copied to clipboard</code> 的类别前缀。</p>
       </div>
 
       <div class="card reveal">
-        <h3><span class="ico i-amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>仍然保留英文的页面（诚实交代）</h3>
-        <p>上游的 6 个次要页面还没翻，功能完全正常，只是文案是英文：</p>
+        <h3><span class="ico i-teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg></span>全部页面已汉化，不再有"保留英文"的角落</h3>
+        <p>日志、个人资料、镜像仓库、认证方式、用户管理、状态页此前一直保留英文，现已全部接入语言包——连同触发器测试弹窗、页脚、OIDC 登录卡片一起：</p>
         <p style="margin-top:10px">
-          <span class="pill p-gray">日志 Logs</span>
-          <span class="pill p-gray">个人资料 Profile</span>
-          <span class="pill p-gray">镜像仓库 Registries</span>
-          <span class="pill p-gray">认证 Authentications</span>
-          <span class="pill p-gray">用户 Users</span>
-          <span class="pill p-gray">状态 State</span>
+          <span class="pill p-teal">日志 Logs</span>
+          <span class="pill p-teal">个人资料 Profile</span>
+          <span class="pill p-teal">镜像仓库 Registries</span>
+          <span class="pill p-teal">认证 Authentications</span>
+          <span class="pill p-teal">用户 Users</span>
+          <span class="pill p-teal">状态 State</span>
         </p>
-        <p style="margin-top:12px" class="muted">补翻很便宜：两份消息包同时加键 → 在 <code>.vue</code> 里把硬编码串换成 <code>$t('ns.key')</code> → push 到 <code>i18n-zh</code>，CI 自动重建镜像。</p>
+        <p style="margin-top:12px" class="muted">并且加了 <b>CI 守卫</b>：<code>ui/scripts/check-i18n-hardcoded.cjs</code> 在 Lint 阶段扫描全部 <code>.vue</code>，发现硬编码英文直接让构建失败。否则上游没有 i18n 层，每次同步都会重新长出英文串。</p>
       </div>
     </div>
 
