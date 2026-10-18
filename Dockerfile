@@ -12,8 +12,7 @@ RUN npm prune --omit=dev
 FROM --platform=$BUILDPLATFORM node:24-alpine AS ui-build
 WORKDIR /home/node/ui
 COPY ui/package*.json ./
-# 使用 npm install 以支持 fork 中新增的依赖（如 vue-i18n），无需重新生成 package-lock.json
-RUN npm install --include=dev --omit=optional --no-audit --no-fund --no-update-notifier
+RUN npm ci --include=dev --omit=optional --no-audit --no-fund --no-update-notifier
 COPY ui/ ./
 RUN npm run build
 
