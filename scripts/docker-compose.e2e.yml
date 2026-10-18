@@ -85,7 +85,7 @@ services:
       - 'wud.display.icon=mdi:aws'
 
   ghcr_radarr:
-    image: ghcr.io/linuxserver/radarr:5.14.0.9383-ls245
+    image: ghcr.io/linuxserver/radarr:1.0.0.1-ls1
     container_name: ghcr_radarr
     command: tail -f /dev/null
     pull_policy: never
@@ -137,7 +137,7 @@ services:
       - 'wud.display.icon=mdi:server-network'
 
   lscr_radarr:
-    image: lscr.io/linuxserver/radarr:5.14.0.9383-ls245
+    image: lscr.io/linuxserver/radarr:1.0.0.1-ls1
     container_name: lscr_radarr
     command: tail -f /dev/null
     pull_policy: never

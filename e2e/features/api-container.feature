@@ -21,16 +21,18 @@ Feature: WUD Container API Exposure
     And response body path $[<index>].updateAvailable should be <updateAvailable>
     Examples:
       | index | registry       | containerName            | registryUrl                                             | imageName                    | tag               | resultTag         | updateAvailable | testCase                     |
-      # The linuxserver/radarr tag is re-released continuously (ls319 -> ls320 -> ...),
-      # so assert its shape instead of a frozen value (apickli treats the expected
-      # value of "response body path ... should be" as a regular expression).
-      | 1     | ghcr.private   | ghcr_radarr              | https://ghcr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | ^6\.4\.4\.\d+-ls\d+$ | true            | GHCR complex semver update   |
+      # The local image is a synthetic tag pinned far below any published radarr
+      # release (`1.0.0.1-ls1`), so an update is always detected no matter which
+      # branch LinuxServer points `latest` at. Only the tag shape is asserted
+      # (apickli treats the expected value of "response body path ... should be"
+      # as a regular expression).
+      | 1     | ghcr.private   | ghcr_radarr              | https://ghcr.io/v2                                      | linuxserver/radarr           | 1.0.0.1-ls1       | ^\d+\.\d+\.\d+\.\d+-ls\d+$ | true            | GHCR complex semver update   |
       | 3     | hub.public     | hub_alpine_latest        | https://registry-1.docker.io/v2                         | library/alpine               | latest            | latest            | false           | Hub latest tag no update     |
       # homeassistant/home-assistant follows a date-based scheme (2026.10.1 -> 2026.10.2 -> ...),
       # so assert the shape instead of a frozen value.
       | 4     | hub.public     | hub_homeassistant_202161 | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | ^\d{4}\.\d+\.\d+$ | true            | Hub date-based versioning    |
       | 5     | hub.public     | hub_nginx_latest         | https://registry-1.docker.io/v2                         | library/nginx                | latest            | latest            | true            | Hub latest tag digest update |
-      | 6     | lscr.private   | lscr_radarr              | https://lscr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | ^6\.4\.4\.\d+-ls\d+$ | true            | LSCR complex semver update   |
+      | 6     | lscr.private   | lscr_radarr              | https://lscr.io/v2                                      | linuxserver/radarr           | 1.0.0.1-ls1       | ^\d+\.\d+\.\d+\.\d+-ls\d+$ | true            | LSCR complex semver update   |
       | 7     | quay.public    | quay_prometheus          | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v3.15.0           | true            | Quay semver major update     |
 
     @ci-only

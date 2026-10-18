@@ -24,12 +24,13 @@ Feature: Prometheus exposure
       | containerName            | registry     | registryUrl                                             | imageName                    | tag               | resultTag          | updateAvailable |
       # | ecr_sub_sub_test         | ecr.private  | https://229211676173.dkr.ecr.eu-west-1.amazonaws.com/v2 | sub/sub/test                 | 1.0.0             | 2.0.0              | true            |
       # apickli compiles the expected value of "response body should contain" as a RegExp;
-      # linuxserver/radarr is re-released continuously (ls319 -> ls320 -> ...), so assert
-      # the tag shape instead of a frozen value to keep the suite from rotting.
-      | ghcr_radarr              | ghcr.private | https://ghcr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6\.4\.4\.\d+-ls\d+ | false           |
+      # the local radarr image is pinned far below any published release, so an update is
+      # always detected. Assert the tag shape instead of a frozen value to keep the suite
+      # from rotting when LinuxServer re-points `latest`.
+      | ghcr_radarr              | ghcr.private | https://ghcr.io/v2                                      | linuxserver/radarr           | 1.0.0.1-ls1       | \d+\.\d+\.\d+\.\d+-ls\d+ | true            |
       | hub_alpine_latest        | hub.public   | https://registry-1.docker.io/v2                         | library/alpine               | latest            | latest             | false           |
       # homeassistant/home-assistant follows a date-based scheme; assert the shape.
       | hub_homeassistant_202161 | hub.public   | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | \d{4}\.\d+\.\d+     | false           |
       | hub_nginx_latest         | hub.public   | https://registry-1.docker.io/v2                         | library/nginx                | latest            | latest             | true            |
-      | lscr_radarr              | lscr.private | https://lscr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6\.4\.4\.\d+-ls\d+ | true            |
+      | lscr_radarr              | lscr.private | https://lscr.io/v2                                      | linuxserver/radarr           | 1.0.0.1-ls1       | \d+\.\d+\.\d+\.\d+-ls\d+ | true            |
       | quay_prometheus          | quay.public  | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v3.15.0            | true            |

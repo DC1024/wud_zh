@@ -17,10 +17,10 @@ docker tag nginx:1.10-alpine fmartinou/test:1.0.0
 docker tag nginx:1.10-alpine 229211676173.dkr.ecr.eu-west-1.amazonaws.com/test:1.0.0
 docker tag nginx:1.10-alpine 229211676173.dkr.ecr.eu-west-1.amazonaws.com/sub/test:1.0.0
 docker tag nginx:1.10-alpine 229211676173.dkr.ecr.eu-west-1.amazonaws.com/sub/sub/test:1.0.0
-docker tag nginx:1.10-alpine ghcr.io/linuxserver/radarr:5.14.0.9383-ls245
+docker tag nginx:1.10-alpine ghcr.io/linuxserver/radarr:1.0.0.1-ls1
 docker tag nginx:1.10-alpine registry.gitlab.com/gitlab-org/gitlab-runner:v16.0.0
 docker tag nginx:1.10-alpine homeassistant/home-assistant:2021.6.1
-docker tag nginx:1.10-alpine lscr.io/linuxserver/radarr:5.14.0.9383-ls245
+docker tag nginx:1.10-alpine lscr.io/linuxserver/radarr:1.0.0.1-ls1
 docker tag nginx:1.10-alpine oci.trueforge.org/containerforge/radarr:6.0.4
 docker tag nginx:1.10-alpine quay.io/prometheus/prometheus:v2.52.0
 
