@@ -284,7 +284,7 @@
         <div class="l">个 i18n 命名空间</div>
       </div>
       <div class="stat c-teal">
-        <div class="n" data-count="375">0<small>/375</small></div>
+        <div class="n" data-count="378">0<small>/378</small></div>
         <div class="l">上游界面文案逐字回取</div>
       </div>
       <div class="stat c-amber">
@@ -343,12 +343,12 @@
         <table style="margin-top:12px">
           <thead><tr><th>分类</th><th>条数</th><th>说明</th></tr></thead>
           <tbody>
-            <tr><td class="k">上游已有文案</td><td>375</td><td><b>375 条逐字一致（100%）</b></td></tr>
-            <tr><td class="k">本分支新增/改写</td><td>127</td><td>新页面 109（监控清单 41 / 服务器 47 / 镜像源 21）+ 既有页面新增入口 17 + 已知偏差 1</td></tr>
+            <tr><td class="k">上游已有文案</td><td>378</td><td><b>378 条逐字一致（100%）</b></td></tr>
+            <tr><td class="k">本分支新增/改写</td><td>124</td><td>新页面 109（监控清单 41 / 服务器 47 / 镜像源 21）+ 既有页面新增入口 15</td></tr>
             <tr><td class="k">合计</td><td>502</td><td>中英两份消息包各 502 条，键位完全对称</td></tr>
           </tbody>
         </table>
-        <p style="margin-top:12px" class="muted">那 18 条非新页面的差异已逐条核对：17 条是挂在既有页面上的新入口文案（监控清单入口、语言切换、条目计数等），<b>1 条是真偏差</b>——首页的复数句丢了上游的 <code>s</code>，已在仓库待办里记着。</p>
+        <p style="margin-top:12px" class="muted">既有页面上那 15 条差异是监控清单入口、语言切换、条目计数一类的<b>新入口文案</b>，逐条核对后确认没有漏翻。此前首页复数句丢失上游 <code>s</code> 的问题已修复，并顺带修掉参数计数、用户计数的同类退化——现在上游文案 <b>100% 逐字一致，无已知偏差</b>。</p>
         <p style="margin-top:12px" class="muted">汉化过程中还回修了 4 处偏差，例如登录按钮必须还原成上游的 <code>Login</code>、复制提示要保留 <code>xxx copied to clipboard</code> 的类别前缀。</p>
       </div>
 
@@ -510,10 +510,10 @@
       <h2>改动规模与文件清单</h2>
       <p class="lead">相对上游基线 <code>9.2.0</code> 的纯 fork 差异（<code>git diff --stat 227ce2a2 i18n-zh</code>，<code>227ce2a2</code> 即合入的 v9.2.0 提交）。</p>
       <div class="stats" style="margin-top:24px">
-        <div class="stat c-blue"><div class="n" data-count="62">0</div><div class="l">个文件变更</div></div>
-        <div class="stat c-teal"><div class="n" data-count="6515" data-prefix="+">0</div><div class="l">行新增</div></div>
-        <div class="stat c-amber"><div class="n" data-count="361" data-prefix="−">0</div><div class="l">行删除</div></div>
-        <div class="stat c-violet"><div class="n" data-count="10">0</div><div class="l">个新增文件</div></div>
+        <div class="stat c-blue"><div class="n" data-count="80">0</div><div class="l">个文件变更</div></div>
+        <div class="stat c-teal"><div class="n" data-count="8964" data-prefix="+">0</div><div class="l">行新增</div></div>
+        <div class="stat c-amber"><div class="n" data-count="577" data-prefix="−">0</div><div class="l">行删除</div></div>
+        <div class="stat c-violet"><div class="n" data-count="14">0</div><div class="l">个新增文件</div></div>
       </div>
     </div>
 
@@ -538,7 +538,7 @@
       </div>
 
       <div class="reveal">
-        <h3 style="font-size:16.5px;margin:0 0 4px">后端改动（仅 14 个文件）</h3>
+        <h3 style="font-size:16.5px;margin:0 0 4px">后端改动（仅 16 个文件）</h3>
         <table>
           <thead><tr><th>文件</th><th>改动</th></tr></thead>
           <tbody>
