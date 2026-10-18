@@ -1,4 +1,4 @@
-import axios, { AxiosRequestConfig } from 'axios';
+import { AxiosRequestConfig } from 'axios';
 import DockerRegistryV2 from '../../DockerRegistryV2';
 import { ContainerImage } from '../../../model/container';
 
@@ -18,20 +18,18 @@ import { ContainerImage } from '../../../model/container';
  * ("Request failed with status code 401") even though `docker pull` works
  * anonymously, because the Docker CLI performs the Bearer handshake below.
  *
- * This provider therefore implements the standard Bearer flow:
- *   1. probe `<registry api base>/` and read the `WWW-Authenticate` challenge
- *   2. request a token from the advertised realm (Basic credentials are sent
- *      too when configured, which keeps private repositories working)
- *   3. replay the original request with `Authorization: Bearer <token>`
+ * The handshake itself is implemented once in `DockerRegistryV2`
+ * (`getBearerChallenge` + `getBearerToken`), which also caches tokens per
+ * `(registryUrl, image, credentials)` with their `expires_in` and applies the
+ * configured proxy. This provider only wires the two calls together; an earlier
+ * fork-local copy of the handshake had no timeout, no expiry and ignored the
+ * proxy configuration.
  *
  * Any failure degrades to the previous behaviour instead of throwing, so a
  * registry that does not advertise a realm keeps working as before.
  */
 class Alibaba extends DockerRegistryV2 {
-    protected registryPattern = /^.*\.?aliyuncs\.com$/;
-
-    /** Cached `WWW-Authenticate` challenge (realm + service) of the registry. */
-    private authChallenge?: { realm: string; service: string };
+    protected registryPattern = /^(?:[\w-]+\.)*aliyuncs\.com$/;
 
     getConfigurationSchema() {
         return this.joi.alternatives([
@@ -46,47 +44,30 @@ class Alibaba extends DockerRegistryV2 {
     }
 
     /**
-     * Registry API base (e.g. `https://registry.cn-hangzhou.aliyuncs.com/v2`).
+     * Registry API origin (e.g. `https://registry.cn-hangzhou.aliyuncs.com`).
+     *
+     * `normalizeImage()` stores the base with a `/v2` suffix, and the image may
+     * carry a repository path; both must be dropped because
+     * `getBearerChallenge()` appends `/v2/` to the origin itself.
      */
     private getRegistryApiBase(image: ContainerImage): string {
-        const url =
+        const url = String(
             (this.configuration && this.configuration.url) ||
-            (image.registry && image.registry.url) ||
-            '';
-        return String(url).replace(/\/+$/, '');
-    }
-
-    /**
-     * Read the Bearer challenge advertised by the registry (`/v2/`).
-     */
-    private async getAuthChallenge(
-        image: ContainerImage,
-    ): Promise<{ realm: string; service: string }> {
-        if (this.authChallenge) {
-            return this.authChallenge;
+                (image.registry && image.registry.url) ||
+                '',
+        ).trim();
+        if (!url) {
+            return '';
         }
-        const probeUrl = `${this.getRegistryApiBase(image)}/`;
-        const response = await axios({
-            method: 'GET',
-            url: probeUrl,
-            // 401 is the expected answer: it carries the WWW-Authenticate header.
-            validateStatus: () => true,
-        });
-        const header = String(response.headers['www-authenticate'] || '');
-        const realmMatch = /realm="([^"]+)"/.exec(header);
-        const serviceMatch = /service="([^"]+)"/.exec(header);
-        if (!realmMatch) {
-            throw new Error(
-                `No Bearer realm advertised by ${probeUrl} (www-authenticate: ${
-                    header || 'none'
-                })`,
-            );
+        try {
+            return new URL(url).origin;
+        } catch {
+            const host = url
+                .replace(/^\/+/, '')
+                .replace(/^https?:\/\//, '')
+                .replace(/\/.*$/, '');
+            return host ? `https://${host}` : '';
         }
-        this.authChallenge = {
-            realm: realmMatch[1],
-            service: serviceMatch ? serviceMatch[1] : '',
-        };
-        return this.authChallenge;
     }
 
     async authenticate(
@@ -94,29 +75,30 @@ class Alibaba extends DockerRegistryV2 {
         requestOptions: AxiosRequestConfig,
     ): Promise<AxiosRequestConfig> {
         const credentials = this.getAuthCredentials();
+        const registryUrl = this.getRegistryApiBase(image);
+
+        if (!registryUrl) {
+            return credentials
+                ? this.authenticateBasic(requestOptions, credentials)
+                : requestOptions;
+        }
+
         try {
-            const challenge = await this.getAuthChallenge(image);
-            const separator = challenge.realm.includes('?') ? '&' : '?';
-            let tokenUrl = `${challenge.realm}${separator}scope=${encodeURIComponent(
-                `repository:${image.name}:pull`,
-            )}`;
-            if (challenge.service) {
-                tokenUrl += `&service=${encodeURIComponent(challenge.service)}`;
+            const challenge = await this.getBearerChallenge(registryUrl);
+            if (!challenge?.realm) {
+                // No Bearer challenge (anonymous registry, or Basic auth):
+                // keep the previous behaviour.
+                return credentials
+                    ? this.authenticateBasic(requestOptions, credentials)
+                    : requestOptions;
             }
 
-            const axiosConfig: AxiosRequestConfig = {
-                method: 'GET',
-                url: tokenUrl,
-                headers: { Accept: 'application/json' },
-            };
-            // Private repositories: send Basic credentials to the token endpoint.
-            if (credentials) {
-                axiosConfig.headers.Authorization = `Basic ${credentials}`;
-            }
-
-            const response = await axios(axiosConfig);
-            // ACR answers `access_token`, the Docker spec uses `token`.
-            const token = response.data.token || response.data.access_token;
+            const token = await this.getBearerToken(
+                image,
+                registryUrl,
+                credentials,
+                challenge,
+            );
             if (!token) {
                 throw new Error(
                     `No token returned by the Alibaba token endpoint ${challenge.realm}`,

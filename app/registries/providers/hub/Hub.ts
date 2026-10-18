@@ -1,5 +1,7 @@
 import axios, { AxiosRequestConfig, AxiosResponse, Method } from 'axios';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import Custom from '../custom/Custom';
+import { BearerChallenge } from '../../DockerRegistryV2';
 import { getUserAgent } from '../../Registry';
 import { ContainerImage } from '../../../model/container';
 import * as hubMirrorStore from '../../../store/hubMirror';
@@ -12,8 +14,16 @@ const DEFAULT_HUB_AUTH_URL = 'https://auth.docker.io/token';
 /** Default `service` parameter expected by the Docker Hub token endpoint. */
 const DEFAULT_HUB_SERVICE = 'registry.docker.io';
 
-/** How long to wait when probing a mirror's `/v2/` for its Bearer realm. */
-const MIRROR_PROBE_TIMEOUT_MS = 8000;
+/**
+ * How long a mirror's (possibly missing) `WWW-Authenticate` challenge is
+ * cached.
+ *
+ * Anonymous mirrors answer 200 on `/v2/`, i.e. they advertise no challenge at
+ * all. Without this cache every registry call would pay an extra round trip to
+ * re-discover that fact. The TTL is short enough that a mirror switching to
+ * authenticated mode is picked up without a restart.
+ */
+const MIRROR_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Docker Hub integration.
@@ -32,9 +42,9 @@ const MIRROR_PROBE_TIMEOUT_MS = 8000;
  * ## Multi-mirror failover (fork feature, 2026-09-21)
  *
  * `url` may be a comma-separated list of mirror base URLs. Each mirror is tried
- * in order; when one fails (network error, 401, 404, 429) the next is tried.
- * The list can also be edited from the web UI (persisted in the store); when a
- * UI list exists it takes priority over the env var.
+ * in order; when one fails the next is tried (see `callRegistry`). The list can
+ * also be edited from the web UI (persisted in the store); when a UI list
+ * exists it takes priority over the env var.
  *
  * Authentication is per-mirror and auto-discovered: each mirror that
  * advertises a `WWW-Authenticate: Bearer realm=...` challenge on its `/v2/` is
@@ -42,8 +52,37 @@ const MIRROR_PROBE_TIMEOUT_MS = 8000;
  * advertise a realm is treated as anonymous (no `Authorization` header).
  */
 class Hub extends Custom {
-    /** Cache of per-mirror pull tokens: baseUrl -> token | null (null = anonymous). */
-    private tokenCache = new Map<string, string | null>();
+    /**
+     * Mirror in effect for the current `callRegistry` attempt.
+     *
+     * The failover loop used to rewrite `this.configuration.url/authurl/service`
+     * for the duration of an attempt and restore them in a `finally`. But
+     * `Docker.ts` fans containers out with `Promise.all` (and the base class
+     * allows a couple of concurrent requests per registry), so several
+     * `callRegistry` calls interleave on the same provider instance. The
+     * save/restore pairs then stop matching: a call can restore the temporary
+     * value captured by another one, leaving `configuration.url` pointing at an
+     * arbitrary mirror. That value is not cosmetic - `normalizeImage()` writes
+     * it into `image.registry.url` (persisted with the container) and
+     * `getImageFullName()` uses it to build the reference passed to
+     * `docker pull`, so a corrupted value makes update triggers pull from the
+     * wrong host.
+     *
+     * Carrying the mirror through `AsyncLocalStorage` keeps the provider
+     * configuration immutable and gives every await chain its own value,
+     * without serializing requests behind a lock.
+     */
+    private static readonly mirrorContext = new AsyncLocalStorage<string>();
+
+    /**
+     * Cache of per-mirror auth challenges (see `MIRROR_CHALLENGE_TTL_MS`).
+     * `challenge` is undefined for mirrors that do not require auth.
+     */
+    private mirrorChallengeCache = new Map<
+        string,
+        { challenge?: BearerChallenge; expiresAt: number }
+    >();
+
     /**
      * The mirror list from the env var (possibly comma-separated), captured
      * before `init()` collapses `configuration.url` to the first mirror.
@@ -118,19 +157,27 @@ class Hub extends Custom {
     }
 
     /**
-     * Base `/v2` URL of the first mirror, used to rewrite request URLs when
-     * switching between mirrors (the image is normalized against the first one).
+     * Mirror to use for the request currently being processed. Falls back to
+     * the configured base when called outside of a `callRegistry` attempt.
      */
-    private getFirstV2Base(): string {
-        return `${this.getMirrors()[0]}/v2`;
+    private currentMirror(): string {
+        return (
+            Hub.mirrorContext.getStore() ||
+            this.configuration.url ||
+            DEFAULT_HUB_URL
+        );
     }
 
     /**
      * Override of the registry HTTP entry point to add mirror failover.
      *
-     * Each mirror is tried in order; the first success is returned. On failure
-     * (network error, 401, 404, 429) the error is recorded and the next mirror
-     * is tried. If every mirror fails the last error is re-thrown.
+     * Each mirror is tried in order; the first success is returned. Every
+     * failure (network error, 4xx, 5xx) is recorded and the next mirror is
+     * tried; if every mirror fails the last error is re-thrown.
+     *
+     * The mirror is passed down through `AsyncLocalStorage` rather than by
+     * mutating `this.configuration`, so concurrent calls cannot observe each
+     * other's mirror.
      */
     async callRegistry<T = any>(options: {
         image: ContainerImage;
@@ -160,47 +207,48 @@ class Hub extends Custom {
         resolveWithFullResponse?: boolean;
     }): Promise<T | AxiosResponse<T>> {
         const mirrors = this.getMirrors();
-        const firstV2Base = this.getFirstV2Base();
         let lastError: any;
 
         for (const mirror of mirrors) {
-            const prevUrl = this.configuration.url;
-            const prevAuthurl = this.configuration.authurl;
-            const prevService = this.configuration.service;
             try {
-                // Point the provider at this mirror for this attempt.
-                this.configuration.url = mirror;
-                this.configuration.authurl = this.isDefaultHub(mirror)
-                    ? DEFAULT_HUB_AUTH_URL
-                    : undefined;
-                if (this.isDefaultHub(mirror)) {
-                    this.configuration.service = DEFAULT_HUB_SERVICE;
-                } else {
-                    this.configuration.service = this.getHostOf(mirror);
-                }
-                const rewrittenUrl = url.replace(firstV2Base, `${mirror}/v2`);
-                // The base class overloads require literal true/false; we carry the
-                // caller's boolean through via a cast to preserve the return shape.
-                const result = await super.callRegistry({
-                    image,
-                    url: rewrittenUrl,
-                    method,
-                    headers,
-                    resolveWithFullResponse,
-                } as any);
+                // The base class overloads require literal true/false; we carry
+                // the caller's boolean through via a cast to preserve the
+                // return shape.
+                const result = await Hub.mirrorContext.run(mirror, () =>
+                    super.callRegistry({
+                        image,
+                        url: Hub.rewriteUrlForMirror(url, mirror),
+                        method,
+                        headers,
+                        resolveWithFullResponse,
+                    } as any),
+                );
                 return result;
             } catch (e: any) {
                 lastError = e;
                 this.log.warn(
                     `Mirror ${mirror} failed for ${image && image.name} (${e && e.message}); trying next mirror`,
                 );
-            } finally {
-                this.configuration.url = prevUrl;
-                this.configuration.authurl = prevAuthurl;
-                this.configuration.service = prevService;
             }
         }
         throw lastError;
+    }
+
+    /**
+     * Point an absolute registry URL at another mirror, keeping the path and
+     * query untouched:
+     * `https://a.example.com/v2/foo/tags/list?n=1` -> `https://b/v2/foo/...`.
+     *
+     * Deriving the base from the URL itself (instead of assuming the first
+     * configured mirror) also keeps requests correct when the mirror list is
+     * edited in the UI after the provider was initialized.
+     */
+    private static rewriteUrlForMirror(url: string, mirror: string): string {
+        const base = /^https?:\/\/[^/]+\/v2(?=\/|$)/.exec(String(url || ''));
+        if (!base) {
+            return url;
+        }
+        return `${mirror}/v2${String(url).slice(base[0].length)}`;
     }
 
     private isDefaultHub(url: string): boolean {
@@ -208,6 +256,47 @@ class Hub extends Custom {
             Hub.trimTrailingSlash(url) ===
             Hub.trimTrailingSlash(DEFAULT_HUB_URL)
         );
+    }
+
+    /**
+     * Whether `mirror` is the primary one, i.e. the one `init()` configured the
+     * provider with (`authurl`/`service` belong to it).
+     */
+    private isPrimaryMirror(mirror: string): boolean {
+        return (
+            Hub.trimTrailingSlash(mirror) ===
+            Hub.trimTrailingSlash(String(this.configuration.url || ''))
+        );
+    }
+
+    /**
+     * Token endpoint to use for a given mirror.
+     *
+     * `configuration.authurl` only applies to the primary mirror; secondary
+     * mirrors must auto-discover their own realm (the previous implementation
+     * achieved the same by resetting `authurl` to undefined on every attempt).
+     */
+    private authUrlForMirror(mirror: string): string | undefined {
+        if (this.isDefaultHub(mirror)) {
+            return DEFAULT_HUB_AUTH_URL;
+        }
+        if (this.isPrimaryMirror(mirror)) {
+            return this.configuration.authurl;
+        }
+        return undefined;
+    }
+
+    /**
+     * `service` parameter to send to a mirror's token endpoint.
+     */
+    private serviceForMirror(mirror: string): string {
+        if (this.isDefaultHub(mirror)) {
+            return DEFAULT_HUB_SERVICE;
+        }
+        if (this.isPrimaryMirror(mirror) && this.configuration.service) {
+            return this.configuration.service;
+        }
+        return this.getHostOf(mirror);
     }
 
     private getHostOf(url: string): string {
@@ -223,6 +312,9 @@ class Hub extends Custom {
     /**
      * Host of the configured registry (used for canonical image names and as
      * the default token `service` parameter when a mirror is configured).
+     *
+     * `configuration.url` is immutable once `init()` has run, so this is
+     * stable even under concurrent requests.
      */
     getRegistryHost(): string {
         try {
@@ -300,42 +392,32 @@ class Hub extends Custom {
     /**
      * Authenticate to Hub (or to the configured mirror).
      *
-     * When no token endpoint is configured (custom mirror), the mirror's own
-     * `WWW-Authenticate: Bearer realm` challenge is auto-discovered on its
-     * `/v2/` and used to fetch a pull token; if no realm is advertised the
-     * mirror is treated as anonymous.
+     * When no token endpoint is configured for the mirror in effect, the
+     * mirror's own `WWW-Authenticate: Bearer realm` challenge is used to fetch
+     * a pull token; if no realm is advertised the mirror is treated as
+     * anonymous (no `Authorization` header, and in particular no Basic
+     * credentials leaked to a third-party mirror).
      */
     async authenticate(
         image: ContainerImage,
         requestOptions: AxiosRequestConfig,
     ) {
-        const credentials = this.getAuthCredentials();
+        const mirror = this.currentMirror();
+        const authUrl = this.authUrlForMirror(mirror);
 
-        // Custom mirror without an explicit token endpoint: auto-discover.
-        if (!this.configuration.authurl && this.configuration.url) {
-            if (!this.isDefaultHub(this.configuration.url)) {
-                const token = await this.discoverMirrorToken(
-                    this.configuration.url,
-                    image,
-                );
-                if (token) {
-                    requestOptions.headers.Authorization = `Bearer ${token}`;
-                }
-                return requestOptions;
-            }
-        }
-
-        // No token endpoint configured and not a mirror to auto-discover:
-        // anonymous (or basic-auth if credentials were explicitly configured).
-        if (!this.configuration.authurl) {
-            return credentials
-                ? this.authenticateBasic(requestOptions, credentials)
+        if (!authUrl) {
+            const token = await this.getMirrorToken(mirror, image);
+            return token
+                ? this.authenticateBearer(requestOptions, token)
                 : requestOptions;
         }
 
+        const credentials = this.getAuthCredentials();
         const axiosConfig: AxiosRequestConfig = {
             method: 'GET',
-            url: `${this.configuration.authurl}?service=${this.configuration.service}&scope=repository:${image.name}:pull&grant_type=password`,
+            url: `${authUrl}?service=${this.serviceForMirror(
+                mirror,
+            )}&scope=repository:${image.name}:pull&grant_type=password`,
             headers: {
                 Accept: 'application/json',
                 'User-Agent': getUserAgent(),
@@ -352,71 +434,53 @@ class Hub extends Custom {
         }
 
         const response = await axios(axiosConfig);
-        const requestOptionsWithAuth = requestOptions;
-        requestOptionsWithAuth.headers.Authorization = `Bearer ${response.data.token}`;
-        return requestOptionsWithAuth;
+        return this.authenticateBearer(requestOptions, response.data.token);
     }
 
     /**
-     * Discover a pull token for a mirror by probing its `/v2/` for a Bearer
-     * realm, then exchanging it for a token. Result is cached per base URL.
-     * @returns the pull token, or null when the mirror is anonymous/unreachable.
+     * Pull token for a mirror, or undefined when the mirror is anonymous.
+     *
+     * Delegates the token exchange (and its cache) to the base class, which
+     * keys entries by `(registryUrl, image.name, credentials)` and honours
+     * `expires_in`. The previous fork-local cache was keyed by mirror URL only,
+     * even though tokens are scoped to `repository:<image>:pull` - so a token
+     * obtained for one image was reused for another and answered 401 - and it
+     * never expired.
+     *
+     * Credentials are deliberately **not** forwarded: the realm is advertised
+     * by the mirror itself, and a third-party mirror must not be handed the
+     * Docker Hub credentials just because it answered the probe. Operators who
+     * do want an authenticated mirror configure `authurl` explicitly, in which
+     * case `authenticate()` takes the trusted, user-supplied endpoint instead.
      */
-    private async discoverMirrorToken(
-        baseUrl: string,
+    private async getMirrorToken(
+        mirror: string,
         image: ContainerImage,
-    ): Promise<string | null> {
-        if (this.tokenCache.has(baseUrl)) {
-            return this.tokenCache.get(baseUrl) ?? null;
+    ): Promise<string | undefined> {
+        const challenge = await this.getMirrorChallenge(mirror);
+        if (!challenge?.realm) {
+            return undefined;
         }
-        try {
-            const probe = await axios({
-                method: 'GET',
-                url: `${baseUrl}/v2/`,
-                validateStatus: () => true,
-                timeout: MIRROR_PROBE_TIMEOUT_MS,
-            });
-            const www = String(
-                (probe.headers && probe.headers['www-authenticate']) || '',
-            );
-            const realmMatch = /realm="([^"]+)"/.exec(www);
-            if (!realmMatch) {
-                this.tokenCache.set(baseUrl, null);
-                return null;
-            }
-            const realm = realmMatch[1];
-            const serviceMatch = /service="([^"]+)"/.exec(www);
-            const service = serviceMatch ? serviceMatch[1] : '';
-            let tokenUrl =
-                realm +
-                (realm.includes('?') ? '&' : '?') +
-                `scope=${encodeURIComponent(`repository:${image.name}:pull`)}`;
-            if (service) {
-                tokenUrl += `&service=${encodeURIComponent(service)}`;
-            }
-            const tokenResponse = await axios({
-                method: 'GET',
-                url: tokenUrl,
-                headers: { Accept: 'application/json' },
-                validateStatus: () => true,
-                timeout: MIRROR_PROBE_TIMEOUT_MS,
-            });
-            const token =
-                (tokenResponse.data && tokenResponse.data.token) ||
-                (tokenResponse.data && tokenResponse.data.access_token);
-            if (token) {
-                this.tokenCache.set(baseUrl, token);
-                return token;
-            }
-            this.tokenCache.set(baseUrl, null);
-            return null;
-        } catch (e: any) {
-            this.log.debug(
-                `Unable to auto-discover Bearer token for mirror ${baseUrl} (${e && e.message}); treating as anonymous`,
-            );
-            this.tokenCache.set(baseUrl, null);
-            return null;
+        return this.getBearerToken(image, mirror, undefined, challenge);
+    }
+
+    /**
+     * `WWW-Authenticate` challenge advertised by a mirror, cached for
+     * `MIRROR_CHALLENGE_TTL_MS`.
+     */
+    private async getMirrorChallenge(
+        mirror: string,
+    ): Promise<BearerChallenge | undefined> {
+        const cached = this.mirrorChallengeCache.get(mirror);
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.challenge;
         }
+        const challenge = await this.getBearerChallenge(mirror);
+        this.mirrorChallengeCache.set(mirror, {
+            challenge,
+            expiresAt: Date.now() + MIRROR_CHALLENGE_TTL_MS,
+        });
+        return challenge;
     }
 
     getImageFullName(image: ContainerImage, tagOrDigest: string) {

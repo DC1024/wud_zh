@@ -15,6 +15,16 @@ export interface BearerChallenge {
 }
 
 /**
+ * Timeout for the `/v2/` auth probe and the token exchange.
+ *
+ * Without it axios falls back to the OS TCP timeout (minutes), so a registry
+ * sitting behind a blackholed route would stall a whole scan instead of just
+ * failing this image. Mirrors used by `Hub` already relied on an 8s timeout;
+ * this makes the same guarantee for every provider.
+ */
+const AUTH_PROBE_TIMEOUT_MS = 8000;
+
+/**
  * Docker Registry V2 Base class.
  * Implements common patterns and behaviors specified by Docker Registry HTTP API V2.
  */
@@ -405,6 +415,7 @@ export class DockerRegistryV2 extends Registry {
                 method: 'GET',
                 url: `${registryUrl}/v2/`,
                 headers: { 'User-Agent': getUserAgent() },
+                timeout: AUTH_PROBE_TIMEOUT_MS,
             },
             this.configuration?.proxy,
         );
@@ -484,6 +495,7 @@ export class DockerRegistryV2 extends Registry {
                 method: 'GET',
                 url: tokenUrl,
                 headers,
+                timeout: AUTH_PROBE_TIMEOUT_MS,
             },
             this.configuration?.proxy,
         );
