@@ -5430,6 +5430,45 @@ describe('Docker Watcher', () => {
                 );
             });
 
+            test('reconcileContainer should keep a container watched by web preference', async () => {
+                await docker.register('watcher', 'docker', 'test', {
+                    watchbydefault: false,
+                });
+                docker.pruneContainerFromStore = jest.fn();
+                storeWatchPreference.getWatchedMap.mockReturnValue(
+                    new Map([['pref-app', true]]),
+                );
+                mockContainer.inspect.mockResolvedValue({
+                    Id: 'pref-id',
+                    Name: '/pref-app',
+                    Image: 'sha256:abc',
+                    State: { Status: 'running' },
+                    Config: { Labels: {} },
+                });
+                const mockContainerModel = {
+                    id: 'pref-id',
+                    name: 'pref-app',
+                } as any;
+                docker.addImageDetailsToContainer = jest
+                    .fn()
+                    .mockResolvedValue(mockContainerModel);
+                docker.checkContainer = jest.fn().mockResolvedValue({
+                    container: mockContainerModel,
+                    changed: false,
+                });
+                storeContainer.getContainers.mockReturnValue([
+                    mockContainerModel,
+                ]);
+
+                const report = await docker.reconcileContainer('pref-id');
+
+                expect(docker.pruneContainerFromStore).not.toHaveBeenCalled();
+                expect(report).toEqual({
+                    container: mockContainerModel,
+                    changed: false,
+                });
+            });
+
             test('reconcileContainer should successfully check container and update prometheus gauge', async () => {
                 await docker.register('watcher', 'docker', 'test', {});
                 mockContainer.inspect.mockResolvedValue({

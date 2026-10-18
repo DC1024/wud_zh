@@ -13,6 +13,7 @@ description: Unreleased changes and upcoming features in WUD (What's Up Docker?)
 - 🐛 [REGISTRY] Fix Hub mirror failover corrupting the configured registry URL under concurrent scans
 - 🐛 [TRIGGER] Fix Home Assistant MQTT summary mode configuration collision (#1357)
 - 🐛 [UI] Fix open redirect vulnerability on authenticated redirect (fixes #744)
+- 🐛 [WATCHER] Honour the stored watch preference during targeted reconciliation so a restarted container is not pruned from the store
 - 🐛 [WATCHER] Normalize aarch64 to arm64 in Swarm watcher (fixes #1401)
 
 ---

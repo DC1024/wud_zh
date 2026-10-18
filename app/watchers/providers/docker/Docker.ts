@@ -986,6 +986,13 @@ export class Docker extends Watcher {
                 return undefined;
             }
 
+            // Same rule as getContainers(): an explicit web preference wins
+            // over `watchbydefault`. Without it, restarting a container that
+            // is only watched through the preference table (no `wud.watch`
+            // label) pruned it from the store until the next full scan.
+            const watchPreferences = storeWatchPreference.getWatchedMap(
+                this.name,
+            );
             const toWatch = isContainerToWatch(
                 containerLabels[wudWatch] || containerLabels['wud.watch'],
                 this.configuration.watchbydefault,
@@ -994,6 +1001,7 @@ export class Docker extends Watcher {
                 this.configuration.exclude,
                 this.configuration.include,
                 this.log,
+                containerName ? watchPreferences.get(containerName) : undefined,
             );
 
             if (!toWatch) {
