@@ -29,7 +29,7 @@
             </v-list-item-subtitle>
           </v-list-item>
         </v-list>
-        <span v-else>Default configuration</span>
+        <span v-else>{{ $t('config.defaultConfig') }}</span>
       </v-card-text>
     </transition>
   </v-card>

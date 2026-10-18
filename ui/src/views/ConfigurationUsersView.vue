@@ -5,9 +5,9 @@
       <v-toolbar color="surface" density="compact" class="px-3 py-1">
         <v-icon icon="mdi-account-group-outline" class="mr-2 text-primary" size="24"></v-icon>
         <div class="d-flex align-center">
-          <span class="text-subtitle-1 font-weight-bold mr-2">User Management</span>
+          <span class="text-subtitle-1 font-weight-bold mr-2">{{ $t('users.title') }}</span>
           <v-chip size="small" variant="tonal" color="primary">
-            {{ users.length }} user{{ users.length > 1 ? 's' : '' }}
+            {{ $t('users.count', { n: users.length }) }}
           </v-chip>
         </div>
 
@@ -17,7 +17,7 @@
         <v-text-field
           v-model="search"
           prepend-inner-icon="mdi-magnify"
-          placeholder="Search users..."
+          :placeholder="$t('users.searchPlaceholder')"
           density="compact"
           variant="outlined"
           hide-details
@@ -35,7 +35,7 @@
           class="mr-2 text-none font-weight-bold"
           @click="openAddDialog"
         >
-          Add User
+          {{ $t('users.add') }}
         </v-btn>
 
         <v-btn
@@ -44,7 +44,7 @@
           size="small"
           @click="loadUsers"
           :loading="isLoading"
-          title="Refresh"
+          :title="$t('config.refresh')"
         ></v-btn>
       </v-toolbar>
     </v-card>
@@ -54,18 +54,18 @@
       <v-table hover density="comfortable">
         <thead>
           <tr>
-            <th class="text-left font-weight-bold">User</th>
-            <th class="text-left font-weight-bold">Role</th>
-            <th class="text-left font-weight-bold">Provider</th>
-            <th class="text-left font-weight-bold">Created</th>
-            <th class="text-right font-weight-bold pr-4">Actions</th>
+            <th class="text-left font-weight-bold">{{ $t('users.colUser') }}</th>
+            <th class="text-left font-weight-bold">{{ $t('users.colRole') }}</th>
+            <th class="text-left font-weight-bold">{{ $t('users.colProvider') }}</th>
+            <th class="text-left font-weight-bold">{{ $t('detail.created') }}</th>
+            <th class="text-right font-weight-bold pr-4">{{ $t('users.colActions') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="filteredUsers.length === 0">
             <td colspan="5" class="text-center py-6 text-medium-emphasis">
               <v-icon icon="mdi-account-search-outline" size="36" class="mb-2 opacity-50"></v-icon>
-              <div>No users found.</div>
+              <div>{{ $t('users.none') }}</div>
             </td>
           </tr>
           <tr v-for="user in filteredUsers" :key="user.id">
@@ -77,7 +77,7 @@
                 </v-avatar>
                 <div>
                   <div class="font-weight-bold">{{ user.username }}</div>
-                  <div class="text-caption text-medium-emphasis">ID: {{ user.id }}</div>
+                  <div class="text-caption text-medium-emphasis">{{ $t('users.idLabel', { id: user.id }) }}</div>
                 </div>
               </div>
             </td>
@@ -101,7 +101,7 @@
                 variant="tonal"
                 :prepend-icon="user.provider === 'oidc' ? 'mdi-openid' : 'mdi-lock-outline'"
               >
-                {{ user.provider === 'oidc' ? 'OIDC' : 'Local' }}
+                {{ user.provider === 'oidc' ? 'OIDC' : $t('profile.providerLocal') }}
               </v-chip>
             </td>
 
@@ -117,7 +117,7 @@
                 variant="text"
                 size="small"
                 color="primary"
-                title="Edit user"
+                :title="$t('users.editUser')"
                 class="mr-1"
                 @click="openEditDialog(user)"
               ></v-btn>
@@ -126,7 +126,7 @@
                 variant="text"
                 size="small"
                 color="error"
-                title="Delete user"
+                :title="$t('users.deleteUser')"
                 :disabled="isCurrentUser(user)"
                 @click="openDeleteDialog(user)"
               ></v-btn>
@@ -141,13 +141,13 @@
       <v-card rounded="lg" class="pa-2">
         <v-card-title class="d-flex align-center">
           <v-icon icon="mdi-account-plus" class="mr-2 text-primary"></v-icon>
-          Create New User
+          {{ $t('users.createTitle') }}
         </v-card-title>
         <v-card-text>
           <v-form ref="addForm" v-model="addValid" @submit.prevent="submitAddUser">
             <v-text-field
               v-model="newUser.username"
-              label="Username"
+              :label="$t('login.username')"
               prepend-inner-icon="mdi-account"
               variant="outlined"
               density="comfortable"
@@ -158,7 +158,7 @@
 
             <v-text-field
               v-model="newUser.password"
-              label="Password"
+              :label="$t('login.password')"
               type="password"
               prepend-inner-icon="mdi-lock"
               variant="outlined"
@@ -172,7 +172,7 @@
               :items="roleOptions"
               item-title="title"
               item-value="value"
-              label="Role"
+              :label="$t('users.role')"
               prepend-inner-icon="mdi-shield-account"
               variant="outlined"
               density="comfortable"
@@ -186,7 +186,7 @@
         </v-card-text>
         <v-card-actions class="px-4 pb-3">
           <v-spacer></v-spacer>
-          <v-btn variant="text" @click="addDialog = false">Cancel</v-btn>
+          <v-btn variant="text" @click="addDialog = false">{{ $t('containers.cancel') }}</v-btn>
           <v-btn
             color="primary"
             variant="flat"
@@ -194,7 +194,7 @@
             :disabled="!addValid"
             @click="submitAddUser"
           >
-            Create
+            {{ $t('users.create') }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -205,7 +205,7 @@
       <v-card rounded="lg" class="pa-2" v-if="selectedUser">
         <v-card-title class="d-flex align-center">
           <v-icon icon="mdi-account-edit" class="mr-2 text-primary"></v-icon>
-          Edit User {{ selectedUser.username }}
+          {{ $t('users.editTitle', { name: selectedUser.username }) }}
         </v-card-title>
         <v-card-text>
           <v-select
@@ -213,7 +213,7 @@
             :items="roleOptions"
             item-title="title"
             item-value="value"
-            label="Role"
+            :label="$t('users.role')"
             prepend-inner-icon="mdi-shield-account"
             variant="outlined"
             density="comfortable"
@@ -231,31 +231,31 @@
             density="compact"
             class="mb-3 text-caption"
           >
-            Note: If OIDC group mapping is configured in WUD, this role will be updated by the identity provider on next login.
+            {{ $t('users.oidcNotice') }}
           </v-alert>
 
           <v-text-field
             v-if="selectedUser.provider === 'local'"
             v-model="editUserPassword"
-            label="Reset Password (leave empty to keep current)"
+            :label="$t('users.resetPassword')"
             type="password"
             prepend-inner-icon="mdi-lock-reset"
             variant="outlined"
             density="comfortable"
-            hint="Enter a new password only if you want to reset it"
+            :hint="$t('users.resetPasswordHint')"
             persistent-hint
           ></v-text-field>
         </v-card-text>
         <v-card-actions class="px-4 pb-3">
           <v-spacer></v-spacer>
-          <v-btn variant="text" @click="editDialog = false">Cancel</v-btn>
+          <v-btn variant="text" @click="editDialog = false">{{ $t('containers.cancel') }}</v-btn>
           <v-btn
             color="primary"
             variant="flat"
             :loading="actionLoading"
             @click="submitEditUser"
           >
-            Save
+            {{ $t('users.save') }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -266,22 +266,21 @@
       <v-card rounded="lg" class="pa-2" v-if="selectedUser">
         <v-card-title class="text-error d-flex align-center">
           <v-icon icon="mdi-alert" class="mr-2 text-error"></v-icon>
-          Delete User
+          {{ $t('users.deleteTitle') }}
         </v-card-title>
         <v-card-text>
-          Are you sure you want to delete user <strong>{{ selectedUser.username }}</strong>?
-          This action cannot be undone.
+          {{ $t('users.deleteConfirmPrefix') }}<strong>{{ selectedUser.username }}</strong>{{ $t('users.deleteConfirmSuffix') }}
         </v-card-text>
         <v-card-actions class="px-4 pb-3">
           <v-spacer></v-spacer>
-          <v-btn variant="text" @click="deleteDialog = false">Cancel</v-btn>
+          <v-btn variant="text" @click="deleteDialog = false">{{ $t('containers.cancel') }}</v-btn>
           <v-btn
             color="error"
             variant="flat"
             :loading="actionLoading"
             @click="submitDeleteUser"
           >
-            Delete
+            {{ $t('containers.delete') }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -291,6 +290,7 @@
 
 <script lang="ts">
 import { defineComponent, ref, computed, onMounted, inject } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { listUsers, createUser, updateUser, deleteUser, UserItem } from '@/services/user';
 import { getUser } from '@/services/auth';
 
@@ -298,6 +298,7 @@ export default defineComponent({
   name: 'ConfigurationUsersView',
   setup() {
     const eventBus = inject('eventBus') as any;
+    const { t } = useI18n();
 
     const users = ref<UserItem[]>([]);
     const currentUser = ref<any>(null);
@@ -320,28 +321,29 @@ export default defineComponent({
 
     const deleteDialog = ref(false);
 
-    const roleOptions = [
+    const roleOptions = computed(() => [
       {
         value: 'admin',
-        title: 'Administrator',
-        subtitle: 'Full access to system, users, and all resources',
+        title: t('users.roleAdmin'),
+        subtitle: t('users.roleAdminHint'),
       },
       {
         value: 'rw',
-        title: 'Read / Write',
-        subtitle: 'Can trigger updates and modify containers & triggers',
+        title: t('users.roleRw'),
+        subtitle: t('users.roleRwHint'),
       },
       {
         value: 'ro',
-        title: 'Read Only',
-        subtitle: 'Can view containers, triggers, and logs only',
+        title: t('users.roleRo'),
+        subtitle: t('users.roleRoHint'),
       },
-    ];
+    ]);
 
-    const rules = {
-      required: (v: string) => !!v || 'Required field',
-      minLength: (v: string) => !v || v.length >= 6 || 'Minimum 6 characters',
-    };
+    const rules = computed(() => ({
+      required: (v: string) => !!v || t('profile.requiredField'),
+      minLength: (v: string) =>
+        !v || v.length >= 6 || t('profile.minChars'),
+    }));
 
     const filteredUsers = computed(() => {
       if (!search.value) return users.value;
@@ -364,7 +366,7 @@ export default defineComponent({
         users.value = await listUsers();
         currentUser.value = await getUser();
       } catch (e: any) {
-        notify(e.message || 'Failed to load users', 'error');
+        notify(e.message || t('users.loadError'), 'error');
       } finally {
         isLoading.value = false;
       }
@@ -389,12 +391,12 @@ export default defineComponent({
     const formatRole = (role: string) => {
       switch (role) {
         case 'admin':
-          return 'Admin';
+          return t('nav.demoAdmin');
         case 'rw':
-          return 'Read/Write';
+          return t('nav.demoRw');
         case 'ro':
         default:
-          return 'Read-Only';
+          return t('nav.demoRo');
       }
     };
 
@@ -417,11 +419,11 @@ export default defineComponent({
       actionLoading.value = true;
       try {
         await createUser(newUser.value);
-        notify(`User ${newUser.value.username} created successfully`, 'success');
+        notify(t('users.created', { name: newUser.value.username }), 'success');
         addDialog.value = false;
         await loadUsers();
       } catch (e: any) {
-        notify(e.message || 'Failed to create user', 'error');
+        notify(e.message || t('users.createError'), 'error');
       } finally {
         actionLoading.value = false;
       }
@@ -445,11 +447,11 @@ export default defineComponent({
           payload.password = editUserPassword.value;
         }
         await updateUser(selectedUser.value.id, payload);
-        notify(`User ${selectedUser.value.username} updated successfully`, 'success');
+        notify(t('users.updated', { name: selectedUser.value.username }), 'success');
         editDialog.value = false;
         await loadUsers();
       } catch (e: any) {
-        notify(e.message || 'Failed to update user', 'error');
+        notify(e.message || t('users.updateError'), 'error');
       } finally {
         actionLoading.value = false;
       }
@@ -465,11 +467,11 @@ export default defineComponent({
       actionLoading.value = true;
       try {
         await deleteUser(selectedUser.value.id);
-        notify(`User ${selectedUser.value.username} deleted successfully`, 'success');
+        notify(t('users.deleted', { name: selectedUser.value.username }), 'success');
         deleteDialog.value = false;
         await loadUsers();
       } catch (e: any) {
-        notify(e.message || 'Failed to delete user', 'error');
+        notify(e.message || t('users.deleteError'), 'error');
       } finally {
         actionLoading.value = false;
       }

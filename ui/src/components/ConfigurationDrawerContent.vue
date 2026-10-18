@@ -38,10 +38,10 @@
     <!-- Configuration Section Header -->
     <div class="d-flex align-center justify-space-between mb-2">
       <span class="text-subtitle-2 font-weight-bold text-medium-emphasis">
-        Configuration Parameters
+        {{ $t('config.configParams') }}
       </span>
       <v-chip size="x-small" variant="outlined" color="grey">
-        {{ configurationItems.length }} {{ configurationItems.length === 1 ? 'entry' : 'entries' }}
+        {{ $t('config.entries', { n: configurationItems.length }) }}
       </v-chip>
     </div>
 
@@ -62,7 +62,7 @@
                 color="grey"
                 class="opacity-60 hover-opacity-100"
                 @click.stop="copyValue(cfg.key, cfg.value)"
-                title="Copy value"
+                :title="$t('config.copyValue')"
               ></v-btn>
             </div>
             <div>
@@ -100,8 +100,8 @@
 
       <div v-else class="pa-6 text-center text-grey">
         <v-icon size="36" class="mb-2 opacity-50">mdi-tune-variant</v-icon>
-        <div class="text-body-2">Default configuration</div>
-        <div class="text-caption text-grey">No custom parameters set</div>
+        <div class="text-body-2">{{ $t('config.defaultConfig') }}</div>
+        <div class="text-caption text-grey">{{ $t('config.noCustomParams') }}</div>
       </div>
     </v-card>
   </div>

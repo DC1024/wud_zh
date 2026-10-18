@@ -32,7 +32,7 @@
         <template #append-inner>
           <v-icon
             :icon="showPassword ? 'mdi-eye-off-outline' : 'mdi-eye-outline'"
-            aria-label="Toggle password visibility"
+            :aria-label="$t('login.togglePassword')"
             role="button"
             tabindex="0"
             @click="showPassword = !showPassword"

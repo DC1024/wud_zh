@@ -23,7 +23,7 @@
         variant="text"
         size="small"
         density="comfortable"
-        aria-label="Close"
+        :aria-label="$t('common.close')"
         class="close-button"
         @click="closeSnackbar"
       >

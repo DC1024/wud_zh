@@ -17,7 +17,7 @@
         <v-text-field
           v-model="search"
           prepend-inner-icon="mdi-magnify"
-          placeholder="Search registries..."
+          :placeholder="$t('registries.searchPlaceholder')"
           density="compact"
           variant="outlined"
           hide-details
@@ -33,7 +33,7 @@
           size="small"
           @click="refreshRegistries"
           :loading="isLoading"
-          title="Refresh"
+          :title="$t('config.refresh')"
         ></v-btn>
       </v-toolbar>
 
@@ -81,9 +81,9 @@
         <template v-slot:no-data>
           <div class="pa-8 text-center text-grey">
             <v-icon size="64" class="mb-4 opacity-50">{{ registryIcon }}</v-icon>
-            <div class="text-h6">No registries found</div>
-            <div class="text-body-2" v-if="search">Try clearing your search</div>
-            <div class="text-body-2" v-else>No registries configured</div>
+            <div class="text-h6">{{ $t('registries.none') }}</div>
+            <div class="text-body-2" v-if="search">{{ $t('registries.noMatchHint') }}</div>
+            <div class="text-body-2" v-else>{{ $t('registries.noneConfigured') }}</div>
           </div>
         </template>
       </v-data-table>
@@ -113,11 +113,11 @@
                 {{ selectedRegistry.name }}
               </div>
               <div class="text-caption text-grey text-truncate">
-                {{ selectedRegistry.type }} registry details
+                {{ $t('registries.details', { type: selectedRegistry.type }) }}
               </div>
             </div>
           </div>
-          <v-btn icon="mdi-close" variant="text" size="small" @click="drawerOpen = false" title="Close details"></v-btn>
+          <v-btn icon="mdi-close" variant="text" size="small" @click="drawerOpen = false" :title="$t('config.closeDetails')"></v-btn>
         </v-toolbar>
 
         <!-- Hub mirror sources action (only meaningful for the hub provider) -->

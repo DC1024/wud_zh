@@ -4,7 +4,7 @@
     <v-card class="border mb-4" elevation="0" rounded="lg">
       <v-toolbar color="surface" density="compact" class="px-3 py-1">
         <v-icon icon="mdi-account-circle-outline" class="mr-2 text-primary" size="24"></v-icon>
-        <span class="text-subtitle-1 font-weight-bold">My Profile</span>
+        <span class="text-subtitle-1 font-weight-bold">{{ $t('nav.myProfile') }}</span>
         <v-spacer></v-spacer>
         <v-btn
           icon="mdi-refresh"
@@ -12,7 +12,7 @@
           size="small"
           @click="loadProfileData"
           :loading="isLoading"
-          title="Refresh"
+          :title="$t('config.refresh')"
         ></v-btn>
       </v-toolbar>
       <v-card-text class="pt-4 pb-4">
@@ -38,10 +38,10 @@
                 variant="tonal"
                 :prepend-icon="profile?.provider === 'oidc' ? 'mdi-openid' : 'mdi-lock-outline'"
               >
-                {{ profile?.provider === 'oidc' ? 'OIDC' : 'Local' }}
+                {{ profile?.provider === 'oidc' ? 'OIDC' : $t('profile.providerLocal') }}
               </v-chip>
               <span class="text-caption text-medium-emphasis ml-2" v-if="profile?.createdAt">
-                Member since: {{ formatDate(profile.createdAt) }}
+                {{ $t('profile.memberSince', { date: formatDate(profile.createdAt) }) }}
               </span>
             </div>
           </v-col>
@@ -56,11 +56,11 @@
         <v-card class="border mb-4" elevation="0" rounded="lg">
           <v-card-title class="text-subtitle-1 font-weight-bold d-flex align-center">
             <v-icon icon="mdi-palette-outline" class="mr-2 text-primary"></v-icon>
-            Appearance
+            {{ $t('profile.appearance') }}
           </v-card-title>
           <v-divider></v-divider>
           <v-card-text>
-            <div class="text-body-2 font-weight-medium mb-3">Theme Preference</div>
+            <div class="text-body-2 font-weight-medium mb-3">{{ $t('profile.themePreference') }}</div>
             <v-radio-group
               v-model="selectedTheme"
               @update:model-value="onThemeChange"
@@ -68,13 +68,13 @@
               hide-details
             >
               <v-radio
-                label="Dark theme"
+                :label="$t('profile.darkTheme')"
                 value="dark"
                 color="primary"
                 class="mb-2"
               ></v-radio>
               <v-radio
-                label="Light theme"
+                :label="$t('profile.lightTheme')"
                 value="light"
                 color="primary"
               ></v-radio>
@@ -86,14 +86,14 @@
         <v-card v-if="profile?.provider === 'local'" class="border mb-4" elevation="0" rounded="lg">
           <v-card-title class="text-subtitle-1 font-weight-bold d-flex align-center">
             <v-icon icon="mdi-shield-lock-outline" class="mr-2 text-primary"></v-icon>
-            Change Password
+            {{ $t('profile.changePassword') }}
           </v-card-title>
           <v-divider></v-divider>
           <v-card-text>
             <v-form ref="passwordForm" v-model="passwordValid" @submit.prevent="submitPasswordChange">
               <v-text-field
                 v-model="currentPassword"
-                label="Current Password"
+                :label="$t('profile.currentPassword')"
                 type="password"
                 prepend-inner-icon="mdi-lock-outline"
                 variant="outlined"
@@ -104,7 +104,7 @@
 
               <v-text-field
                 v-model="newPassword"
-                label="New Password"
+                :label="$t('profile.newPassword')"
                 type="password"
                 prepend-inner-icon="mdi-key-outline"
                 variant="outlined"
@@ -115,7 +115,7 @@
 
               <v-text-field
                 v-model="confirmPassword"
-                label="Confirm New Password"
+                :label="$t('profile.confirmNewPassword')"
                 type="password"
                 prepend-inner-icon="mdi-check-circle-outline"
                 variant="outlined"
@@ -132,7 +132,7 @@
                 :disabled="!passwordValid"
                 class="text-none font-weight-bold"
               >
-                Update Password
+                {{ $t('profile.updatePassword') }}
               </v-btn>
             </v-form>
           </v-card-text>
@@ -144,7 +144,7 @@
         <v-card class="border mb-4" elevation="0" rounded="lg">
           <v-toolbar color="surface" density="compact" class="px-3 py-1">
             <v-icon icon="mdi-key-variant" class="mr-2 text-primary"></v-icon>
-            <span class="text-subtitle-1 font-weight-bold mr-2">Personal API Tokens</span>
+            <span class="text-subtitle-1 font-weight-bold mr-2">{{ $t('profile.personalTokens') }}</span>
             <v-chip size="small" variant="tonal" color="primary">
               {{ tokens.length }}
             </v-chip>
@@ -157,32 +157,32 @@
               class="text-none font-weight-bold"
               @click="openCreateTokenDialog"
             >
-              Generate Token
+              {{ $t('profile.generateToken') }}
             </v-btn>
           </v-toolbar>
           <v-divider></v-divider>
 
           <v-card-text class="pa-0">
             <div class="px-4 py-2 text-caption text-medium-emphasis">
-              API tokens can be used to authenticate requests to the WUD API (using <code>Authorization: Bearer wud_...</code> header).
+              {{ $t('profile.tokensHelpPrefix') }}<code>Authorization: Bearer wud_...</code>{{ $t('profile.tokensHelpSuffix') }}
             </div>
 
             <v-table hover density="comfortable">
               <thead>
                 <tr>
-                  <th class="text-left font-weight-bold">Name</th>
-                  <th class="text-left font-weight-bold">Scopes</th>
-                  <th class="text-left font-weight-bold">Created</th>
-                  <th class="text-left font-weight-bold">Expires</th>
-                  <th class="text-left font-weight-bold">Last Used</th>
-                  <th class="text-right font-weight-bold pr-4">Revoke</th>
+                  <th class="text-left font-weight-bold">{{ $t('detail.name') }}</th>
+                  <th class="text-left font-weight-bold">{{ $t('profile.scopes') }}</th>
+                  <th class="text-left font-weight-bold">{{ $t('detail.created') }}</th>
+                  <th class="text-left font-weight-bold">{{ $t('profile.expires') }}</th>
+                  <th class="text-left font-weight-bold">{{ $t('profile.lastUsed') }}</th>
+                  <th class="text-right font-weight-bold pr-4">{{ $t('profile.revoke') }}</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-if="tokens.length === 0">
                   <td colspan="6" class="text-center py-6 text-medium-emphasis">
                     <v-icon icon="mdi-key-remove" size="32" class="mb-2 opacity-50"></v-icon>
-                    <div>No API tokens generated yet.</div>
+                    <div>{{ $t('profile.noTokens') }}</div>
                   </td>
                 </tr>
                 <tr v-for="token in tokens" :key="token.id">
@@ -204,11 +204,11 @@
                   <td class="text-caption text-medium-emphasis">{{ formatDate(token.createdAt) }}</td>
                   <td class="text-caption text-medium-emphasis">
                     <span v-if="token.expiresAt">{{ formatDate(token.expiresAt) }}</span>
-                    <span v-else class="text-success">Never</span>
+                    <span v-else class="text-success">{{ $t('profile.never') }}</span>
                   </td>
                   <td class="text-caption text-medium-emphasis">
                     <span v-if="token.lastUsedAt">{{ formatDate(token.lastUsedAt) }}</span>
-                    <span v-else>Never</span>
+                    <span v-else>{{ $t('profile.never') }}</span>
                   </td>
                   <td class="text-right pr-4">
                     <v-btn
@@ -216,7 +216,7 @@
                       variant="text"
                       size="small"
                       color="error"
-                      title="Revoke token"
+                      :title="$t('profile.revokeToken')"
                       @click="openDeleteTokenDialog(token)"
                     ></v-btn>
                   </td>
@@ -233,14 +233,14 @@
       <v-card rounded="lg" class="pa-2">
         <v-card-title class="d-flex align-center">
           <v-icon icon="mdi-key-plus" class="mr-2 text-primary"></v-icon>
-          Generate API Token
+          {{ $t('profile.generateApiToken') }}
         </v-card-title>
         <v-card-text>
           <v-form ref="createTokenForm" v-model="tokenValid" @submit.prevent="submitCreateToken">
             <v-text-field
               v-model="newToken.name"
-              label="Token Name / Description"
-              placeholder="e.g. Home Assistant, Deployment Script"
+              :label="$t('profile.tokenName')"
+              :placeholder="$t('profile.tokenNamePlaceholder')"
               prepend-inner-icon="mdi-label-outline"
               variant="outlined"
               density="comfortable"
@@ -249,11 +249,11 @@
               autofocus
             ></v-text-field>
 
-            <div class="text-subtitle-2 font-weight-bold mb-1">Permissions (Scopes)</div>
+            <div class="text-subtitle-2 font-weight-bold mb-1">{{ $t('profile.permissions') }}</div>
             <v-checkbox
               v-model="newToken.scopes"
               value="read"
-              label="Read (View containers, logs, configuration)"
+              :label="$t('profile.scopeRead')"
               color="primary"
               density="compact"
               hide-details
@@ -261,7 +261,7 @@
             <v-checkbox
               v-model="newToken.scopes"
               value="write"
-              label="Write (Trigger updates, manage container updates)"
+              :label="$t('profile.scopeWrite')"
               color="primary"
               density="compact"
               hide-details
@@ -273,7 +273,7 @@
               :items="expirationOptions"
               item-title="title"
               item-value="value"
-              label="Expiration"
+              :label="$t('profile.expiration')"
               prepend-inner-icon="mdi-clock-outline"
               variant="outlined"
               density="comfortable"
@@ -283,7 +283,7 @@
         </v-card-text>
         <v-card-actions class="px-4 pb-3">
           <v-spacer></v-spacer>
-          <v-btn variant="text" @click="createTokenDialog = false">Cancel</v-btn>
+          <v-btn variant="text" @click="createTokenDialog = false">{{ $t('containers.cancel') }}</v-btn>
           <v-btn
             color="primary"
             variant="flat"
@@ -291,7 +291,7 @@
             :disabled="!tokenValid || newToken.scopes.length === 0"
             @click="submitCreateToken"
           >
-            Generate
+            {{ $t('profile.generate') }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -302,11 +302,11 @@
       <v-card rounded="lg" class="pa-2">
         <v-card-title class="d-flex align-center text-success">
           <v-icon icon="mdi-check-circle" class="mr-2 text-success"></v-icon>
-          API Token Generated
+          {{ $t('profile.tokenCreatedTitle') }}
         </v-card-title>
         <v-card-text>
           <v-alert type="warning" variant="tonal" density="compact" class="mb-3">
-            Please copy this token now. For your security, it will <strong>never be shown again</strong>.
+            {{ $t('profile.copyNowPrefix') }}<strong>{{ $t('profile.neverShown') }}</strong>{{ $t('profile.copyNowSuffix') }}
           </v-alert>
 
           <v-text-field
@@ -318,7 +318,7 @@
             append-inner-icon="mdi-content-copy"
             @click:append-inner="copyTokenToClipboard"
             class="mb-2 font-monospace"
-            hint="Click the copy icon to copy to clipboard"
+            :hint="$t('profile.copyHint')"
             persistent-hint
           ></v-text-field>
         </v-card-text>
@@ -329,7 +329,7 @@
             variant="flat"
             @click="showSecretDialog = false"
           >
-            I Have Saved This Token
+            {{ $t('profile.savedToken') }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -340,22 +340,21 @@
       <v-card rounded="lg" class="pa-2" v-if="selectedToken">
         <v-card-title class="text-error d-flex align-center">
           <v-icon icon="mdi-alert" class="mr-2 text-error"></v-icon>
-          Revoke Token
+          {{ $t('profile.revokeTitle') }}
         </v-card-title>
         <v-card-text>
-          Are you sure you want to revoke token <strong>{{ selectedToken.name }}</strong>?
-          Any applications using this token will immediately lose access.
+          {{ $t('profile.revokeConfirmPrefix') }}<strong>{{ selectedToken.name }}</strong>{{ $t('profile.revokeConfirmSuffix') }}
         </v-card-text>
         <v-card-actions class="px-4 pb-3">
           <v-spacer></v-spacer>
-          <v-btn variant="text" @click="deleteTokenDialog = false">Cancel</v-btn>
+          <v-btn variant="text" @click="deleteTokenDialog = false">{{ $t('containers.cancel') }}</v-btn>
           <v-btn
             color="error"
             variant="flat"
             :loading="tokenActionLoading"
             @click="submitDeleteToken"
           >
-            Revoke
+            {{ $t('profile.revoke') }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -364,8 +363,9 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, onMounted, inject } from 'vue';
+import { defineComponent, ref, computed, onMounted, inject } from 'vue';
 import { useTheme } from 'vuetify';
+import { useI18n } from 'vue-i18n';
 import {
   getProfile,
   updatePreferences,
@@ -383,6 +383,7 @@ export default defineComponent({
   setup() {
     const theme = useTheme();
     const eventBus = inject('eventBus') as any;
+    const { t } = useI18n();
 
     const profile = ref<UserItem | null>(null);
     const tokens = ref<ApiTokenItem[]>([]);
@@ -417,18 +418,21 @@ export default defineComponent({
       expiration: 'never',
     });
 
-    const expirationOptions = [
-      { title: 'Never expires', value: 'never' },
-      { title: '30 days', value: '30d' },
-      { title: '90 days', value: '90d' },
-      { title: '1 year', value: '1y' },
-    ];
+    // Computed so the labels follow the active locale.
+    const expirationOptions = computed(() => [
+      { title: t('profile.expNever'), value: 'never' },
+      { title: t('profile.expDays', { n: 30 }), value: '30d' },
+      { title: t('profile.expDays', { n: 90 }), value: '90d' },
+      { title: t('profile.exp1y'), value: '1y' },
+    ]);
 
-    const rules = {
-      required: (v: string) => !!v || 'Required field',
-      minLength: (v: string) => !v || v.length >= 6 || 'Minimum 6 characters',
-      matchesNew: (v: string) => v === newPassword.value || 'Passwords do not match',
-    };
+    const rules = computed(() => ({
+      required: (v: string) => !!v || t('profile.requiredField'),
+      minLength: (v: string) =>
+        !v || v.length >= 6 || t('profile.minChars'),
+      matchesNew: (v: string) =>
+        v === newPassword.value || t('profile.passwordsMismatch'),
+    }));
 
     const notify = (msg: string, level = 'info') => {
       eventBus?.emit('notify', msg, level);
@@ -449,12 +453,12 @@ export default defineComponent({
     const formatRole = (role?: string) => {
       switch (role) {
         case 'admin':
-          return 'Admin';
+          return t('nav.demoAdmin');
         case 'rw':
-          return 'Read/Write';
+          return t('nav.demoRw');
         case 'ro':
         default:
-          return 'Read-Only';
+          return t('nav.demoRo');
       }
     };
 
@@ -478,7 +482,7 @@ export default defineComponent({
         }
         tokens.value = await listTokens();
       } catch (e: any) {
-        notify(e.message || 'Failed to load profile', 'error');
+        notify(e.message || t('profile.loadError'), 'error');
       } finally {
         isLoading.value = false;
       }
@@ -489,9 +493,9 @@ export default defineComponent({
       localStorage.darkMode = String(val === 'dark');
       try {
         await updatePreferences({ theme: val });
-        notify('Theme preference saved', 'success');
+        notify(t('profile.themeSaved'), 'success');
       } catch (e: any) {
-        notify(e.message || 'Failed to save theme preference', 'error');
+        notify(e.message || t('profile.themeSaveError'), 'error');
       }
     };
 
@@ -500,12 +504,12 @@ export default defineComponent({
       passwordLoading.value = true;
       try {
         await updatePassword(currentPassword.value, newPassword.value);
-        notify('Password updated successfully', 'success');
+        notify(t('profile.passwordUpdated'), 'success');
         currentPassword.value = '';
         newPassword.value = '';
         confirmPassword.value = '';
       } catch (e: any) {
-        notify(e.message || 'Failed to update password', 'error');
+        notify(e.message || t('profile.passwordUpdateError'), 'error');
       } finally {
         passwordLoading.value = false;
       }
@@ -548,7 +552,7 @@ export default defineComponent({
         showSecretDialog.value = true;
         tokens.value = await listTokens();
       } catch (e: any) {
-        notify(e.message || 'Failed to create token', 'error');
+        notify(e.message || t('profile.tokenCreateError'), 'error');
       } finally {
         tokenActionLoading.value = false;
       }
@@ -558,9 +562,9 @@ export default defineComponent({
       if (!generatedSecret.value) return;
       const copied = await copyToClipboard(generatedSecret.value);
       if (copied) {
-        notify('Token copied to clipboard', 'success');
+        notify(t('profile.tokenCopied'), 'success');
       } else {
-        notify('Unable to copy to clipboard', 'warning');
+        notify(t('profile.copyFailed'), 'warning');
       }
     };
 
@@ -574,11 +578,11 @@ export default defineComponent({
       tokenActionLoading.value = true;
       try {
         await deleteToken(selectedToken.value.id);
-        notify(`Token ${selectedToken.value.name} revoked`, 'success');
+        notify(t('profile.tokenRevoked', { name: selectedToken.value.name }), 'success');
         deleteTokenDialog.value = false;
         tokens.value = await listTokens();
       } catch (e: any) {
-        notify(e.message || 'Failed to revoke token', 'error');
+        notify(e.message || t('profile.tokenRevokeError'), 'error');
       } finally {
         tokenActionLoading.value = false;
       }
