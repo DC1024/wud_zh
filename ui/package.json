@@ -18,7 +18,7 @@
     "core-js": "^3.41.0",
     "register-service-worker": "^1.7.2",
     "vue": "^3.5.43",
-    "vue-i18n": "^10.0.5",
+    "vue-i18n": "^11.4.15",
     "vue-inline-svg": "^2.1.4",
     "vue-router": "^4.6.4",
     "vuetify": "^3.13.5"
