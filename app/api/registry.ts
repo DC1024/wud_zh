@@ -12,7 +12,6 @@ import logger from '../log';
 import * as component from './component';
 import { requireRole } from './rbac';
 import * as hubMirrorStore from '../store/hubMirror';
-import * as http from 'http';
 import * as https from 'https';
 import * as dns from 'dns';
 import * as net from 'net';
@@ -160,6 +159,7 @@ async function probeMirror(url) {
             error: 'target resolves to a private/internal address; set WUD_REGISTRY_MIRROR_ALLOW_PRIVATE=true to permit a LAN mirror',
         };
     }
+    const parsed = new URL(base);
     const opts: any = {
         method: 'GET',
         url: `${base}/v2/`,
@@ -167,15 +167,19 @@ async function probeMirror(url) {
         timeout: MIRROR_PROBE_TIMEOUT_MS,
         maxRedirects: 0,
     };
-    // Pin the resolved IP to close the DNS-rebinding TOCTOU window while keeping
-    // the original Host/SNI (so TLS keeps working for https mirrors).
+    // Pin the resolved IP to close the DNS-rebinding TOCTOU window: connect
+    // directly to the resolved address while keeping the original Host header
+    // (and SNI for https) so the server still routes and validates correctly.
+    // We drive the connection target ourselves instead of relying on a custom
+    // dns lookup on the agent, which is not honoured on every Node build.
     if (guard.ip) {
-        const lookup = (_h: string, _o: any, cb: any) =>
-            cb(null, guard.ip, guard.family || 4);
-        if (base.startsWith('https:')) {
-            opts.httpsAgent = new https.Agent({ lookup });
-        } else {
-            opts.httpAgent = new http.Agent({ lookup });
+        const ipLiteral = net.isIPv6(guard.ip) ? `[${guard.ip}]` : guard.ip;
+        const port = parsed.port ? `:${parsed.port}` : '';
+        const scheme = base.startsWith('https:') ? 'https' : 'http';
+        opts.url = `${scheme}://${ipLiteral}${port}/v2/`;
+        opts.headers = { Host: parsed.host };
+        if (scheme === 'https') {
+            opts.httpsAgent = new https.Agent({ servername: parsed.hostname });
         }
     }
     try {
