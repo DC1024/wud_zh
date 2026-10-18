@@ -41,7 +41,12 @@
         {{ $t('config.configParams') }}
       </span>
       <v-chip size="x-small" variant="outlined" color="grey">
-        {{ $t('config.entries', { n: configurationItems.length }) }}
+        {{
+          $t('config.entries', {
+            n: configurationItems.length,
+            s: configurationItems.length === 1 ? 'y' : 'ies',
+          })
+        }}
       </v-chip>
     </div>
 

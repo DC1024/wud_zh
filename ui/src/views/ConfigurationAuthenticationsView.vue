@@ -211,7 +211,10 @@ export default defineComponent({
   methods: {
     getConfigurationCount(item: any): string {
       const count = Object.keys(item.configuration || {}).length;
-      return (this as any).$t("config.params", { n: count });
+      return (this as any).$t("config.params", {
+        n: count,
+        s: count === 1 ? "" : "s",
+      });
     },
     onRowClick(event: any, row: any) {
       const item = row?.item?.raw || row?.item || row;

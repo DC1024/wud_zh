@@ -7,7 +7,7 @@
         <div class="d-flex align-center">
           <span class="text-subtitle-1 font-weight-bold mr-2">{{ $t('users.title') }}</span>
           <v-chip size="small" variant="tonal" color="primary">
-            {{ $t('users.count', { n: users.length }) }}
+            {{ $t('users.count', { n: users.length, s: users.length > 1 ? 's' : '' }) }}
           </v-chip>
         </div>
 

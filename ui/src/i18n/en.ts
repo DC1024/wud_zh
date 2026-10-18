@@ -141,7 +141,7 @@ export default {
   },
   home: {
     brand: "What's Up Docker?",
-    updatesAvailable: "{n} update available for your containers",
+    updatesAvailable: "{n} update{s} available for your containers",
     allUpToDate: "All your containers are currently up-to-date and running smoothly",
     reviewUpdates: "Review Updates",
     infrastructureHealthy: "Infrastructure Healthy",
@@ -326,7 +326,7 @@ export default {
     test: "Test",
     testThisTrigger: "Test this trigger",
     closeDetails: "Close details",
-    params: "{n} params",
+    params: "{n} param{s}",
     noMatchingParams: "No matching parameters",
     defaultConfig: "Default configuration",
     noCustomParams: "No custom parameters set",
@@ -338,7 +338,7 @@ export default {
     loadWatchersError: "Error when trying to load the watchers ({msg})",
     loadServerError: "Error when trying to load the server configuration ({msg})",
     configParams: "Configuration Parameters",
-    entries: "{n} entry(ies)",
+    entries: "{n} entr{s}",
   },
   registries: {
     searchPlaceholder: "Search registries...",
@@ -511,7 +511,7 @@ export default {
   },
   users: {
     title: "User Management",
-    count: "{n} user(s)",
+    count: "{n} user{s}",
     searchPlaceholder: "Search users...",
     add: "Add User",
     colUser: "User",

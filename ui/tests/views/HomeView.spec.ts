@@ -80,6 +80,16 @@ describe('HomeView', () => {
     expect(updateBtn.attributes('style')).toContain('pointer-events: none');
   });
   
+  it('keeps the hero message singular for a single pending update', () => {
+    expect(wrapper.text()).toContain('1 update available for your containers');
+    expect(wrapper.text()).not.toContain('1 updates available for your containers');
+  });
+
+  it('pluralizes the hero message when several updates are pending', async () => {
+    await wrapper.setData({ containersToUpdateCount: 3 });
+    expect(wrapper.text()).toContain('3 updates available for your containers');
+  });
+
   it('navigates to correct routes', () => {
       // Find all v-btn stubs
       const links = wrapper.findAll('.v-btn-stub');

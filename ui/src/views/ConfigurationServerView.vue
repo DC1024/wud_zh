@@ -62,7 +62,12 @@
               variant="tonal"
               class="font-weight-medium"
             >
-              {{ card.filteredItems.length }} {{ $t('config.params', { n: card.filteredItems.length }) }}
+              {{
+                $t('config.params', {
+                  n: card.filteredItems.length,
+                  s: card.filteredItems.length === 1 ? '' : 's',
+                })
+              }}
             </v-chip>
           </v-toolbar>
 

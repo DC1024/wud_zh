@@ -14,7 +14,7 @@
             <p class="text-body-2 text-medium-emphasis mb-0">
               <span v-if="containersToUpdateCount > 0" class="d-inline-flex align-center text-warning font-weight-medium">
                 <v-icon size="16" class="mr-1">mdi-alert-circle</v-icon>
-                {{ $t('home.updatesAvailable', { n: containersToUpdateCount }) }}
+                {{ $t('home.updatesAvailable', { n: containersToUpdateCount, s: containersToUpdateCount > 1 ? 's' : '' }) }}
               </span>
               <span v-else class="d-inline-flex align-center text-success font-weight-medium">
                 <v-icon size="16" class="mr-1">mdi-check-circle</v-icon>
