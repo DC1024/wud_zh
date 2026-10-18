@@ -44,6 +44,10 @@ jobs:
           (cd app && npm run lint)
           (cd ui && npm run lint)
           (cd e2e && npm run lint)
+      # Upstream has no i18n layer, so every sync reintroduces English literals
+      # unless something fails the build. See ui/scripts/check-i18n-hardcoded.cjs.
+      - name: Check for hard-coded UI strings
+        run: node ui/scripts/check-i18n-hardcoded.cjs
 
   unit-test:
     name: Unit Tests
