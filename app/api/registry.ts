@@ -78,9 +78,7 @@ function isPrivateIp(ip: string): boolean {
  * the target as unreachable rather than risk a false positive on split-horizon
  * or offline resolvers.
  */
-async function resolveAndGuard(
-    base: string,
-): Promise<{
+async function resolveAndGuard(base: string): Promise<{
     ok: boolean;
     ip?: string | null;
     family?: number;
@@ -145,8 +143,7 @@ async function probeMirror(url) {
             ok: false,
             status: 'BLOCKED',
             kind: 'private',
-            error:
-                'target resolves to a private/internal address; set WUD_REGISTRY_MIRROR_ALLOW_PRIVATE=true to permit a LAN mirror',
+            error: 'target resolves to a private/internal address; set WUD_REGISTRY_MIRROR_ALLOW_PRIVATE=true to permit a LAN mirror',
         };
     }
     const opts: any = {
