@@ -30,16 +30,45 @@
 const fs = require('fs');
 const nodemailer = require('/home/node/app/node_modules/nodemailer');
 
-const AUTH = process.env.WUD_AUTH || 'admin:<YOUR_WUD_PASSWORD>';
+// API 鉴权：优先用显式 WUD_AUTH；否则由 WUD 容器自带的
+// WUD_AUTH_ADMIN_USER / WUD_AUTH_ADMIN_PASSWORD 拼出（线上即此路径）。
+// 早期版本只认 WUD_AUTH 占位符，导致 401 而更新从未真正触发。
+const AUTH =
+  process.env.WUD_AUTH ||
+  (process.env.WUD_AUTH_ADMIN_USER && process.env.WUD_AUTH_ADMIN_PASSWORD
+    ? process.env.WUD_AUTH_ADMIN_USER + ':' + process.env.WUD_AUTH_ADMIN_PASSWORD
+    : 'admin:<YOUR_WUD_PASSWORD>');
 const BASE = 'http://127.0.0.1:3000';
+// 邮件配置：WUD 容器内实际用的是 WUD_TRIGGER_SMTP_MAIL_* 系列变量，
+// 旧的 SMTP_*/MAIL_* 占位符在线上取不到值，邮件会发不出去。这里两个来源都认。
 const MAIL = {
-  host: process.env.SMTP_HOST || 'smtp.example.com',
-  port: 465,
-  secure: true,
-  auth: { user: process.env.SMTP_USER || '<YOUR_SMTP_USER>', pass: process.env.SMTP_PASS || '<YOUR_SMTP_PASS>' },
+  host:
+    process.env.WUD_TRIGGER_SMTP_MAIL_HOST ||
+    process.env.SMTP_HOST ||
+    'smtp.example.com',
+  port: Number(
+    process.env.WUD_TRIGGER_SMTP_MAIL_PORT || process.env.SMTP_PORT || 465,
+  ),
+  secure: (process.env.WUD_TRIGGER_SMTP_MAIL_TLS_ENABLED || 'true') !== 'false',
+  auth: {
+    user:
+      process.env.WUD_TRIGGER_SMTP_MAIL_USER ||
+      process.env.SMTP_USER ||
+      '<YOUR_SMTP_USER>',
+    pass:
+      process.env.WUD_TRIGGER_SMTP_MAIL_PASS ||
+      process.env.SMTP_PASS ||
+      '<YOUR_SMTP_PASS>',
+  },
 };
-const TO = process.env.MAIL_TO || '<YOUR_EMAIL>';
-const FROM = process.env.MAIL_FROM || 'WUD <YOUR_EMAIL>';
+const TO =
+  process.env.WUD_TRIGGER_SMTP_MAIL_TO ||
+  process.env.MAIL_TO ||
+  '<YOUR_EMAIL>';
+const FROM =
+  process.env.WUD_TRIGGER_SMTP_MAIL_FROM_ADDRESS ||
+  process.env.MAIL_FROM ||
+  'WUD <YOUR_EMAIL>';
 // 大镜像（如 ollama 5.46GB）拉取慢，窗口放宽到 35min
 const DEADLINE_MS = 35 * 60 * 1000;
 // 冷却期：同一容器的重复触发在这个窗口内一律忽略
@@ -179,8 +208,10 @@ async function main() {
   const imageLabel = [reg, repo].filter(Boolean).join('/') + ':' + tag;
 
   // 更新前的本机镜像标识（用于判断镜像是否真被替换）
-  const beforeValue = (img.digest && img.digest.value) || null;
-  const beforeRepo = (img.digest && img.digest.repo) || null;
+  // 注意：这两个变量在下面「按名重定位后回填」分支里会被重新赋值，
+  // 因此必须是 let，绝不能是 const（否则严格模式下抛 Assignment to constant variable）。
+  let beforeValue = (img.digest && img.digest.value) || null;
+  let beforeRepo = (img.digest && img.digest.repo) || null;
   const targetV = uk.remoteValue || (c.result && c.result.digest) || '-';
 
   console.log(
@@ -223,11 +254,14 @@ async function main() {
   let afterRepo = beforeRepo;
   let afterId = id;
 
-  // 五修（2026-10-16）：整轮更新（触发 + 轮询确认）失败后自动重试，
-  // 最多 UPDATE_RETRIES 次。首失败即发「将自动重试」通知，重试成功则发
-  // 正常成功邮件，全部失败才发最终失败邮件。动机：23:56 agent2api 案例——
-  // wud_zh 新版 docker.local 触发器在 updateKind 瞬时 unknown/竞态时抛
-  // 「Assignment to constant variable」，实际无事，重试即愈。
+  // 五修（2026-10-16）→ 2026-10-19 修正根因：整轮更新（触发 + 轮询确认）失败后
+  // 自动重试，最多 UPDATE_RETRIES 次。首失败即发「将自动重试」通知，重试成功则发
+  // 正常成功邮件，全部失败才发最终失败邮件。
+  // 真正的根因（2026-10-19 定位）：本脚本自身在严格模式（"use strict"）下把 const
+  // 声明的 beforeValue / beforeRepo 在 262/266 行重新赋值，抛
+  // 「Assignment to constant variable」，且发生在 POST 更新触发之前，所以容器从未被
+  // 真正触发、3 次重试全部确定性失败（与竞态/unknown 无关）。已把这两个变量改为 let。
+  // 原注释把原因归到 WUD 后端「竞态」是错误的，特此更正。
   async function notify(subject, body) {
     try {
       const transport = nodemailer.createTransport(MAIL);
