@@ -12,6 +12,10 @@ import logger from '../log';
 import * as component from './component';
 import { requireRole } from './rbac';
 import * as hubMirrorStore from '../store/hubMirror';
+import * as http from 'http';
+import * as https from 'https';
+import * as dns from 'dns';
+import * as net from 'net';
 
 const log = logger.child({ component: 'registry-event' });
 
@@ -27,8 +31,94 @@ export function getRegistry(req, res) {
 const MIRROR_PROBE_TIMEOUT_MS = 8000;
 
 /**
+ * SSRF guard for mirror probes.
+ *
+ * By default we refuse to probe targets that resolve to a private / loopback /
+ * link-local / CGNAT address. Set `WUD_REGISTRY_MIRROR_ALLOW_PRIVATE=true` to
+ * permit a LAN mirror — this is intentionally opt-in and OFF by default.
+ */
+function allowPrivateTarget(): boolean {
+    const v = process.env.WUD_REGISTRY_MIRROR_ALLOW_PRIVATE;
+    return v === '1' || v === 'true' || v === 'yes';
+}
+
+/**
+ * True when `ip` is a private / internal address that must never be probed
+ * through an attacker-influenced input path. Covers IPv4 RFC1918, loopback,
+ * link-local, CGNAT and the IPv6 equivalents.
+ */
+function isPrivateIp(ip: string): boolean {
+    if (!net.isIP(ip)) return false;
+    if (net.isIPv4(ip)) {
+        const p = ip.split('.').map(Number);
+        if (p[0] === 10) return true; // 10.0.0.0/8
+        if (p[0] === 127) return true; // 127.0.0.0/8 loopback
+        if (p[0] === 0) return true; // 0.0.0.0/8
+        if (p[0] === 169 && p[1] === 254) return true; // 169.254.0.0/16
+        if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true; // 172.16.0.0/12
+        if (p[0] === 192 && p[1] === 168) return true; // 192.168.0.0/16
+        if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // 100.64.0.0/10
+        return false;
+    }
+    const lower = ip.toLowerCase();
+    if (lower === '::1') return true; // loopback
+    if (lower === '::') return true; // unspecified
+    if (lower.startsWith('fe80')) return true; // link-local
+    if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // ULA
+    return false;
+}
+
+/**
+ * Validate + resolve a mirror base URL for SSRF safety.
+ *  - Rejects non http/https schemes (file://, gopher://, dict://, ...).
+ *  - Resolves the hostname once and pins the IP (closes DNS-rebinding TOCTOU).
+ *  - Flags private/loopback/link-local/CGNAT targets (caller blocks unless allowed).
+ *
+ * DNS failures are intentionally NOT blocked: we let the real request report
+ * the target as unreachable rather than risk a false positive on split-horizon
+ * or offline resolvers.
+ */
+async function resolveAndGuard(
+    base: string,
+): Promise<{
+    ok: boolean;
+    ip?: string | null;
+    family?: number;
+    blocked?: boolean;
+    kind?: string;
+    error?: string;
+}> {
+    let parsed: URL;
+    try {
+        parsed = new URL(base);
+    } catch {
+        return { ok: false, kind: 'invalid', error: 'malformed url' };
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return {
+            ok: false,
+            kind: 'invalid',
+            error: `unsupported scheme: ${parsed.protocol}`,
+        };
+    }
+    try {
+        const { address, family } = await dns.lookup(parsed.hostname, {
+            all: false,
+        });
+        const blocked = !allowPrivateTarget() && isPrivateIp(address);
+        return { ok: true, ip: address, family, blocked };
+    } catch {
+        return { ok: true, ip: null, family: null, blocked: false };
+    }
+}
+
+/**
  * Probe a single mirror base URL the same way the Hub provider would:
  * GET /v2/ and inspect the `WWW-Authenticate` challenge.
+ *
+ * Hardened against SSRF: only http/https are allowed, redirects are disabled
+ * (`maxRedirects: 0`), the resolved IP is pinned to defeat DNS-rebinding, and
+ * private/internal targets are blocked unless explicitly permitted.
  * @returns {{ok: boolean, status: number|string, kind: string, error?: string}}
  */
 async function probeMirror(url) {
@@ -41,13 +131,44 @@ async function probeMirror(url) {
             error: 'empty url',
         };
     }
+    const guard = await resolveAndGuard(base);
+    if (!guard.ok) {
+        return {
+            ok: false,
+            status: 'n/a',
+            kind: guard.kind,
+            error: guard.error,
+        };
+    }
+    if (guard.blocked) {
+        return {
+            ok: false,
+            status: 'BLOCKED',
+            kind: 'private',
+            error:
+                'target resolves to a private/internal address; set WUD_REGISTRY_MIRROR_ALLOW_PRIVATE=true to permit a LAN mirror',
+        };
+    }
+    const opts: any = {
+        method: 'GET',
+        url: `${base}/v2/`,
+        validateStatus: () => true,
+        timeout: MIRROR_PROBE_TIMEOUT_MS,
+        maxRedirects: 0,
+    };
+    // Pin the resolved IP to close the DNS-rebinding TOCTOU window while keeping
+    // the original Host/SNI (so TLS keeps working for https mirrors).
+    if (guard.ip) {
+        const lookup = (_h: string, _o: any, cb: any) =>
+            cb(null, guard.ip, guard.family || 4);
+        if (base.startsWith('https:')) {
+            opts.httpsAgent = new https.Agent({ lookup });
+        } else {
+            opts.httpAgent = new http.Agent({ lookup });
+        }
+    }
     try {
-        const response = await axios({
-            method: 'GET',
-            url: `${base}/v2/`,
-            validateStatus: () => true,
-            timeout: MIRROR_PROBE_TIMEOUT_MS,
-        });
+        const response = await axios(opts);
         const www = String(
             (response.headers && response.headers['www-authenticate']) || '',
         );
@@ -63,12 +184,14 @@ async function probeMirror(url) {
             kind,
             auth: www.slice(0, 80),
         };
-    } catch (e) {
+    } catch (e: any) {
+        const msg = String((e && e.message) || e);
+        const redirected = /maxredirects/i.test(msg);
         return {
             ok: false,
             status: 'ERR',
-            kind: 'unreachable',
-            error: String((e && e.message) || e).slice(0, 120),
+            kind: redirected ? 'redirect' : 'unreachable',
+            error: msg.slice(0, 120),
         };
     }
 }

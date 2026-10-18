@@ -5,6 +5,7 @@ import * as registryApi from './registry';
 import * as registry from '../registry';
 import Registry from '../registries/Registry';
 import * as hubMirrorStore from '../store/hubMirror';
+import * as dns from 'dns';
 
 jest.mock('../registry', () => ({
     getState: jest.fn(() => ({
@@ -30,6 +31,13 @@ jest.mock('axios', () => {
         headers: { 'www-authenticate': 'Bearer realm="https://x/v2/token"' },
     });
     return fn;
+});
+
+jest.mock('dns', () => {
+    const lookup = jest.fn((_host: string, _opts: any) =>
+        Promise.resolve({ address: '93.184.216.34', family: 4 }),
+    );
+    return { lookup };
 });
 
 describe('API Registry', () => {
@@ -174,6 +182,62 @@ describe('API Registry', () => {
             expect(res.status).toBe(200);
             expect(res.body.health[0].ok).toBe(false);
             expect(res.body.health[0].kind).toBe('unreachable');
+        });
+
+        test('POST /hub/mirrors/test rejects non-http(s) schemes', async () => {
+            const res = await request(mirrorApp)
+                .post('/hub/mirrors/test')
+                .send({ url: 'file:///etc/passwd' });
+            expect(res.status).toBe(200);
+            expect(res.body.ok).toBe(false);
+            expect(res.body.kind).toBe('invalid');
+            expect(res.body.error).toMatch(/scheme/i);
+            expect(axios).not.toHaveBeenCalled();
+        });
+
+        test('POST /hub/mirrors/test blocks private/internal targets by default', async () => {
+            (dns.lookup as any).mockResolvedValueOnce({
+                address: '127.0.0.1',
+                family: 4,
+            });
+            const res = await request(mirrorApp)
+                .post('/hub/mirrors/test')
+                .send({ url: 'http://localhost:5000' });
+            expect(res.status).toBe(200);
+            expect(res.body.ok).toBe(false);
+            expect(res.body.kind).toBe('private');
+            expect(res.body.status).toBe('BLOCKED');
+            expect(axios).not.toHaveBeenCalled();
+        });
+
+        test('POST /hub/mirrors/test permits private target when ALLOW_PRIVATE is set', async () => {
+            const prev = process.env.WUD_REGISTRY_MIRROR_ALLOW_PRIVATE;
+            process.env.WUD_REGISTRY_MIRROR_ALLOW_PRIVATE = 'true';
+            (dns.lookup as any).mockResolvedValueOnce({
+                address: '127.0.0.1',
+                family: 4,
+            });
+            try {
+                const res = await request(mirrorApp)
+                    .post('/hub/mirrors/test')
+                    .send({ url: 'http://localhost:5000' });
+                expect(res.status).toBe(200);
+                expect(res.body.ok).toBe(true);
+                expect(res.body.kind).toBe('bearer');
+            } finally {
+                if (prev === undefined)
+                    delete process.env.WUD_REGISTRY_MIRROR_ALLOW_PRIVATE;
+                else process.env.WUD_REGISTRY_MIRROR_ALLOW_PRIVATE = prev;
+            }
+        });
+
+        test('POST /hub/mirrors/test treats DNS failure as not-blocked', async () => {
+            (dns.lookup as any).mockRejectedValueOnce(new Error('ENOTFOUND'));
+            const res = await request(mirrorApp)
+                .post('/hub/mirrors/test')
+                .send({ url: 'https://mirror-unknown.example.com' });
+            expect(res.status).toBe(200);
+            expect(res.body.ok).toBe(true);
         });
     });
 });

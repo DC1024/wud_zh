@@ -16,6 +16,7 @@ description: Unreleased changes and upcoming features in WUD (What's Up Docker?)
 - 🐛 [CORE] Move the fork's `watched_containers` migration off upstream's id space (9005) and key applied migrations by name, so an upstream migration can no longer collide with it
 - 🐛 [CORE] Resilient Docker event stream with exponential backoff and targeted single-container reconciliation on update (fixes #1393)
 - 🐛 [REGISTRY] Fix Hub mirror failover corrupting the configured registry URL under concurrent scans
+- 🐛 [REGISTRY] Harden the Hub mirror probe against SSRF: allow only http/https, disable redirect following (`maxRedirects: 0`), pin the resolved IP to defeat DNS-rebinding, and block private/loopback/link-local/CGNAT targets unless `WUD_REGISTRY_MIRROR_ALLOW_PRIVATE` is set
 - 🐛 [TRIGGER] Apply Docker Compose digest-only updates for floating tags without changing the image reference (fixes #1404)
 - 🐛 [TRIGGER] Fix Home Assistant MQTT summary mode configuration collision (#1357)
 - 🐛 [TRIGGER] Fix self-update disabled error message to reflect trigger type (fixes #1414)
