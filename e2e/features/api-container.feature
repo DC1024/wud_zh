@@ -26,7 +26,9 @@ Feature: WUD Container API Exposure
       # value of "response body path ... should be" as a regular expression).
       | 1     | ghcr.private   | ghcr_radarr              | https://ghcr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | ^6\.4\.4\.\d+-ls\d+$ | true            | GHCR complex semver update   |
       | 3     | hub.public     | hub_alpine_latest        | https://registry-1.docker.io/v2                         | library/alpine               | latest            | latest            | false           | Hub latest tag no update     |
-      | 4     | hub.public     | hub_homeassistant_202161 | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | 2026.10.1         | true            | Hub date-based versioning    |
+      # homeassistant/home-assistant follows a date-based scheme (2026.10.1 -> 2026.10.2 -> ...),
+      # so assert the shape instead of a frozen value.
+      | 4     | hub.public     | hub_homeassistant_202161 | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | ^\d{4}\.\d+\.\d+$ | true            | Hub date-based versioning    |
       | 5     | hub.public     | hub_nginx_latest         | https://registry-1.docker.io/v2                         | library/nginx                | latest            | latest            | true            | Hub latest tag digest update |
       | 6     | lscr.private   | lscr_radarr              | https://lscr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | ^6\.4\.4\.\d+-ls\d+$ | true            | LSCR complex semver update   |
       | 7     | quay.public    | quay_prometheus          | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v3.15.0           | true            | Quay semver major update     |
@@ -76,7 +78,7 @@ Feature: WUD Container API Exposure
     Then response code should be 200
     And response body should be valid json
     And response body path $.link should be https://github.com/home-assistant/core/releases/tag/2021.6.1
-    And response body path $.result.link should be https://github.com/home-assistant/core/releases/tag/2026.10.1
+    And response body path $.result.link should be https://github\.com/home-assistant/core/releases/tag/\d{4}\.\d+\.\d+
 
   # Test watch trigger functionality
   @ci-only

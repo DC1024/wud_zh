@@ -28,7 +28,8 @@ Feature: Prometheus exposure
       # the tag shape instead of a frozen value to keep the suite from rotting.
       | ghcr_radarr              | ghcr.private | https://ghcr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6\.4\.4\.\d+-ls\d+ | false           |
       | hub_alpine_latest        | hub.public   | https://registry-1.docker.io/v2                         | library/alpine               | latest            | latest             | false           |
-      | hub_homeassistant_202161 | hub.public   | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | 2026.10.1          | false           |
+      # homeassistant/home-assistant follows a date-based scheme; assert the shape.
+      | hub_homeassistant_202161 | hub.public   | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | \d{4}\.\d+\.\d+     | false           |
       | hub_nginx_latest         | hub.public   | https://registry-1.docker.io/v2                         | library/nginx                | latest            | latest             | true            |
       | lscr_radarr              | lscr.private | https://lscr.io/v2                                      | linuxserver/radarr           | 5.14.0.9383-ls245 | 6\.4\.4\.\d+-ls\d+ | true            |
       | quay_prometheus          | quay.public  | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v3.15.0            | true            |
