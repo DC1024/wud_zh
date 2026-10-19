@@ -202,4 +202,96 @@ describe('ContainerItem', () => {
     const updateBtn = wrapper.findAll('.v-btn').find((btn) => btn.text().includes('Update'));
     expect(updateBtn).toBeUndefined();
   });
+
+  it('displays official badge when isOfficial is true', async () => {
+    await wrapper.setProps({
+      container: {
+        ...mockContainer,
+        isOfficial: true,
+      },
+    });
+    expect(wrapper.text()).toContain('Official');
+  });
+
+  it('hides official badge when isOfficial is false or not set', async () => {
+    await wrapper.setProps({
+      container: {
+        ...mockContainer,
+        isOfficial: false,
+      },
+    });
+    expect(wrapper.text()).not.toContain('Official');
+  });
+
+  it('computes docUrl from documentationUrl or link', async () => {
+    expect(wrapper.vm.docUrl).toBeUndefined();
+
+    await wrapper.setProps({
+      container: {
+        ...mockContainer,
+        link: 'https://example.com/legacy-link',
+      },
+    });
+    expect(wrapper.vm.docUrl).toBe('https://example.com/legacy-link');
+
+    await wrapper.setProps({
+      container: {
+        ...mockContainer,
+        link: 'https://example.com/legacy-link',
+        documentationUrl: 'https://example.com/docs',
+      },
+    });
+    expect(wrapper.vm.docUrl).toBe('https://example.com/docs');
+  });
+
+  it('renders Docs, Changelog, and Source action buttons when URLs are present', async () => {
+    wrapper.vm.showDetail = true;
+    await wrapper.setProps({
+      container: {
+        ...mockContainer,
+        updateAvailable: false,
+        documentationUrl: 'https://docs.example.com',
+        changelogUrl: 'https://github.com/org/repo/releases',
+        upstreamUrl: 'https://github.com/org/repo',
+      },
+    });
+    await wrapper.vm.$nextTick();
+
+    const buttons = wrapper.findAll('.v-card-actions .v-btn');
+    const docsBtn = buttons.find((btn) => btn.text().includes('Docs'));
+    const changelogBtn = buttons.find((btn) => btn.text().includes('Changelog'));
+    const sourceBtn = buttons.find((btn) => btn.text().includes('Source'));
+
+    expect(docsBtn).toBeDefined();
+    expect(docsBtn.attributes('href')).toBe('https://docs.example.com');
+
+    expect(changelogBtn).toBeDefined();
+    expect(changelogBtn.attributes('href')).toBe('https://github.com/org/repo/releases');
+
+    expect(sourceBtn).toBeDefined();
+    expect(sourceBtn.attributes('href')).toBe('https://github.com/org/repo');
+  });
+
+  it('renders Release notes action button pointing to result.changelogUrl when updateAvailable is true', async () => {
+    wrapper.vm.showDetail = true;
+    await wrapper.setProps({
+      container: {
+        ...mockContainer,
+        updateAvailable: true,
+        changelogUrl: 'https://github.com/org/repo/releases',
+        result: {
+          tag: '2.0.0',
+          changelogUrl: 'https://github.com/org/repo/releases/tag/v2.0.0',
+        },
+      },
+    });
+    await wrapper.vm.$nextTick();
+
+    const buttons = wrapper.findAll('.v-card-actions .v-btn');
+    const releaseNotesBtn = buttons.find((btn) => btn.text().includes('Release notes'));
+
+    expect(releaseNotesBtn).toBeDefined();
+    expect(releaseNotesBtn.attributes('href')).toBe('https://github.com/org/repo/releases/tag/v2.0.0');
+    expect(releaseNotesBtn.attributes('title')).toBe('Release notes (2.0.0)');
+  });
 });

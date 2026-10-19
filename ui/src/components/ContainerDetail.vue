@@ -110,22 +110,44 @@
         container.transformTags
       }}</v-list-item-subtitle>
     </v-list-item>
-    <v-list-item v-if="container.linkTemplate">
+    <v-list-item v-if="container.isOfficial">
       <template v-slot:prepend>
-        <v-icon color="secondary">mdi-file-replace</v-icon>
+        <v-icon color="primary">mdi-check-decagram</v-icon>
       </template>
-      <v-list-item-title>{{ $t('detail.linkTemplate') }}</v-list-item-title>
-      <v-list-item-subtitle>{{
-        container.linkTemplate
-      }}</v-list-item-subtitle>
+      <v-list-item-title>{{ $t('detail.official') }}</v-list-item-title>
+      <v-list-item-subtitle>{{ $t('detail.officialDockerImage') }}</v-list-item-subtitle>
     </v-list-item>
-    <v-list-item v-if="container.link">
+    <v-list-item v-if="container.documentationUrl">
       <template v-slot:prepend>
-        <v-icon color="secondary">mdi-link</v-icon>
+        <v-icon color="secondary">mdi-book-open-page-variant</v-icon>
       </template>
-      <v-list-item-title>{{ $t('detail.link') }}</v-list-item-title>
-      <v-list-item-subtitle
-        ><a :href="container.link" target="_blank">{{ container.link }}</a>
+      <v-list-item-title>{{ $t('detail.documentation') }}</v-list-item-title>
+      <v-list-item-subtitle>
+        <a :href="container.documentationUrl" target="_blank">{{
+          container.documentationUrl
+        }}</a>
+      </v-list-item-subtitle>
+    </v-list-item>
+    <v-list-item v-if="container.updateAvailable ? (container.result?.changelogUrl || container.changelogUrl) : container.changelogUrl">
+      <template v-slot:prepend>
+        <v-icon color="secondary">mdi-history</v-icon>
+      </template>
+      <v-list-item-title>{{ container.updateAvailable ? $t('detail.releaseNotes') : $t('detail.changelog') }}</v-list-item-title>
+      <v-list-item-subtitle>
+        <a :href="container.updateAvailable ? (container.result?.changelogUrl || container.changelogUrl) : container.changelogUrl" target="_blank">{{
+          container.updateAvailable ? (container.result?.changelogUrl || container.changelogUrl) : container.changelogUrl
+        }}</a>
+      </v-list-item-subtitle>
+    </v-list-item>
+    <v-list-item v-if="container.upstreamUrl">
+      <template v-slot:prepend>
+        <v-icon color="secondary">mdi-code-tags</v-icon>
+      </template>
+      <v-list-item-title>{{ $t('detail.sourceCode') }}</v-list-item-title>
+      <v-list-item-subtitle>
+        <a :href="container.upstreamUrl" target="_blank">{{
+          container.upstreamUrl
+        }}</a>
       </v-list-item-subtitle>
     </v-list-item>
   </v-list>

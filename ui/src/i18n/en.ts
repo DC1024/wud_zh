@@ -138,6 +138,20 @@ export default {
     updateOk: "Update triggered successfully for {name}",
     updateError: "Update triggered with error ({msg})",
     refreshContainersError: "Error when trying to refresh containers ({msg})",
+    // Upstream 9.5.0 official badge + quick link actions (Docs / Release notes
+    // / Source). Values kept verbatim so the specs that assert on the English
+    // UI (see tests/setup.ts) keep passing.
+    official: "Official",
+    officialDockerImage: "Official Docker Image",
+    documentation: "Documentation",
+    docs: "Docs",
+    releaseNotes: "Release notes",
+    releaseNotesTag: "Release notes ({tag})",
+    changelog: "Changelog",
+    sourceCode: "Source Code",
+    sourceCodeLower: "Source code",
+    source: "Source",
+    viewReleaseNotes: "View release notes for {version}",
   },
   home: {
     brand: "What's Up Docker?",
@@ -174,6 +188,13 @@ export default {
     link: "Link",
     osArch: "OS / Architecture",
     created: "Created",
+    // Upstream 9.5.0: the "Link template" / "Link" rows were replaced by these.
+    official: "Official",
+    officialDockerImage: "Official Docker Image",
+    documentation: "Documentation",
+    releaseNotes: "Release notes",
+    changelog: "Changelog",
+    sourceCode: "Source Code",
   },
   filter: {
     containers: "Containers",

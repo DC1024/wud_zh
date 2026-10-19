@@ -129,6 +129,19 @@
                   :margin-right="8"
                 />
                 <span>{{ item.raw ? item.raw.displayName : item.displayName }}</span>
+                <v-tooltip bottom v-if="item.raw ? item.raw.isOfficial : item.isOfficial">
+                  <template v-slot:activator="{ props }">
+                    <v-icon
+                      size="small"
+                      color="primary"
+                      class="ml-1"
+                      v-bind="props"
+                    >
+                      mdi-check-decagram
+                    </v-icon>
+                  </template>
+                  <span>{{ $t('containers.officialDockerImage') }}</span>
+                </v-tooltip>
               </div>
             </template>
 
@@ -140,23 +153,42 @@
 
             <template #[`item.update`]="{ item }">
               <template v-if="item.raw ? item.raw.updateAvailable : item.updateAvailable">
-                <v-tooltip bottom>
-                  <template v-slot:activator="{ props }">
-                    <v-chip
-                      label
-                      variant="flat"
-                      :color="getNewVersionClass(item.raw || item)"
-                      size="small"
-                      v-bind="props"
-                      @click.stop="copyToClipboard('copy.containerNewVersion', getNewVersion(item.raw || item))"
-                      class="cursor-pointer font-weight-bold"
-                    >
-                      <v-icon start size="small">mdi-arrow-up-bold</v-icon>
-                      {{ getNewVersion(item.raw || item) }}
-                    </v-chip>
-                  </template>
-                  <span class="text-caption">{{ $t('containers.copyToClipboard') }}</span>
-                </v-tooltip>
+                <div class="d-inline-flex align-center">
+                  <v-tooltip bottom>
+                    <template v-slot:activator="{ props }">
+                      <v-chip
+                        label
+                        variant="flat"
+                        :color="getNewVersionClass(item.raw || item)"
+                        size="small"
+                        v-bind="props"
+                        @click.stop="copyToClipboard('copy.containerNewVersion', getNewVersion(item.raw || item))"
+                        class="cursor-pointer font-weight-bold"
+                      >
+                        <v-icon start size="small">mdi-arrow-up-bold</v-icon>
+                        {{ getNewVersion(item.raw || item) }}
+                      </v-chip>
+                    </template>
+                    <span class="text-caption">{{ $t('containers.copyToClipboard') }}</span>
+                  </v-tooltip>
+                  <v-tooltip bottom v-if="(item.raw ? item.raw.result?.changelogUrl : item.result?.changelogUrl) || (item.raw ? item.raw.changelogUrl : item.changelogUrl)">
+                    <template v-slot:activator="{ props }">
+                      <v-btn
+                        icon="mdi-history"
+                        variant="text"
+                        color="secondary"
+                        size="small"
+                        class="ml-1"
+                        :href="(item.raw ? item.raw.result?.changelogUrl : item.result?.changelogUrl) || (item.raw ? item.raw.changelogUrl : item.changelogUrl)"
+                        target="_blank"
+                        v-bind="props"
+                        @click.stop
+                        :aria-label="$t('containers.viewReleaseNotes', { version: getNewVersion(item.raw || item) })"
+                      />
+                    </template>
+                    <span>{{ $t('containers.viewReleaseNotes', { version: getNewVersion(item.raw || item) }) }}</span>
+                  </v-tooltip>
+                </div>
               </template>
               <template v-else-if="(item.raw ? item.raw.isSnoozed : item.isSnoozed) || (item.raw ? item.raw.snoozedVersion : item.snoozedVersion)">
                 <v-tooltip bottom>
@@ -232,6 +264,38 @@
                     prepend-icon="mdi-bell-ring"
                     :title="$t('containers.unsnoozeUpdate')"
                     @click.stop="executeUnsnooze(item.raw || item)"
+                  />
+                  <v-list-item
+                    v-if="(item.raw ? item.raw.documentationUrl : item.documentationUrl) || (item.raw ? item.raw.link : item.link)"
+                    prepend-icon="mdi-book-open-page-variant"
+                    :title="$t('containers.documentation')"
+                    :href="(item.raw ? item.raw.documentationUrl : item.documentationUrl) || (item.raw ? item.raw.link : item.link)"
+                    target="_blank"
+                    @click.stop
+                  />
+                  <v-list-item
+                    v-if="(item.raw ? item.raw.updateAvailable : item.updateAvailable) && ((item.raw ? item.raw.result?.changelogUrl : item.result?.changelogUrl) || (item.raw ? item.raw.changelogUrl : item.changelogUrl))"
+                    prepend-icon="mdi-history"
+                    :title="$t('containers.releaseNotesTag', { tag: getNewVersion(item.raw || item) })"
+                    :href="(item.raw ? item.raw.result?.changelogUrl : item.result?.changelogUrl) || (item.raw ? item.raw.changelogUrl : item.changelogUrl)"
+                    target="_blank"
+                    @click.stop
+                  />
+                  <v-list-item
+                    v-else-if="item.raw ? item.raw.changelogUrl : item.changelogUrl"
+                    prepend-icon="mdi-history"
+                    :title="$t('containers.changelog')"
+                    :href="item.raw ? item.raw.changelogUrl : item.changelogUrl"
+                    target="_blank"
+                    @click.stop
+                  />
+                  <v-list-item
+                    v-if="item.raw ? item.raw.upstreamUrl : item.upstreamUrl"
+                    prepend-icon="mdi-code-tags"
+                    :title="$t('containers.sourceCodeLower')"
+                    :href="item.raw ? item.raw.upstreamUrl : item.upstreamUrl"
+                    target="_blank"
+                    @click.stop
                   />
                   <v-list-item
                     v-if="deleteEnabled && canWrite"
@@ -854,11 +918,14 @@ export default defineComponent({
 
     getNewVersion(container: any) {
       let newVersion = "unknown";
-      if (container.result?.created && container.image.created !== container.result.created) {
+      if (container.result?.created && container.image?.created !== container.result.created) {
         newVersion = (this as any).$filters.dateTime(container.result.created);
       }
+      if (container.result?.tag) {
+        newVersion = container.result.tag;
+      }
       if (container.updateKind) {
-        newVersion = container.updateKind.remoteValue;
+        newVersion = container.updateKind.remoteValue || newVersion;
       }
       if (container.updateKind?.kind === "digest") {
         newVersion = (this as any).$filters.short(newVersion, 15);

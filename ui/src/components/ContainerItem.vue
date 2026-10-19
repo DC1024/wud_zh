@@ -66,6 +66,21 @@
               {{ container.image.tag.value }}
             </v-chip>
           </span>
+          <v-tooltip v-if="container.isOfficial" bottom>
+            <template v-slot:activator="{ props }">
+              <v-chip
+                label
+                variant="outlined"
+                color="info"
+                class="ml-1"
+                v-bind="props"
+              >
+                <v-icon start size="small">mdi-check-decagram</v-icon>
+                {{ $t('containers.official') }}
+              </v-chip>
+            </template>
+            <span class="text-caption">{{ $t('containers.officialDockerImage') }}</span>
+          </v-tooltip>
           <span v-if="smAndUp && container.updateAvailable" class="d-flex align-center" style="gap: 4px">
             <v-icon>mdi-arrow-right</v-icon>
             <v-tooltip bottom>
@@ -177,6 +192,48 @@
                 >
                   {{ $t('containers.update') }}
                   <v-icon right>mdi-package-down</v-icon>
+                </v-btn>
+
+                <v-btn
+                  v-if="docUrl"
+                  small
+                  color="secondary"
+                  variant="outlined"
+                  class="mr-2"
+                  :title="$t('containers.documentation')"
+                  :href="docUrl"
+                  target="_blank"
+                >
+                  {{ $t('containers.docs') }}
+                  <v-icon right>mdi-book-open-page-variant</v-icon>
+                </v-btn>
+
+                <v-btn
+                  v-if="container.updateAvailable ? (container.result?.changelogUrl || container.changelogUrl) : container.changelogUrl"
+                  small
+                  color="secondary"
+                  variant="outlined"
+                  class="mr-2"
+                  :title="container.updateAvailable ? (container.result?.tag ? $t('containers.releaseNotesTag', { tag: container.result.tag }) : $t('containers.releaseNotes')) : $t('containers.changelog')"
+                  :href="container.updateAvailable ? (container.result?.changelogUrl || container.changelogUrl) : container.changelogUrl"
+                  target="_blank"
+                >
+                  {{ container.updateAvailable ? $t('containers.releaseNotes') : $t('containers.changelog') }}
+                  <v-icon right>mdi-history</v-icon>
+                </v-btn>
+
+                <v-btn
+                  v-if="container.upstreamUrl"
+                  small
+                  color="secondary"
+                  variant="outlined"
+                  class="mr-2"
+                  :title="$t('containers.sourceCode')"
+                  :href="container.upstreamUrl"
+                  target="_blank"
+                >
+                  {{ $t('containers.source') }}
+                  <v-icon right>mdi-code-tags</v-icon>
                 </v-btn>
 
                 <v-dialog
@@ -379,6 +436,12 @@ export default defineComponent({
         }
       }
       return color;
+    },
+
+    docUrl(): string | undefined {
+      return (
+        this.container.documentationUrl || this.container.link || undefined
+      );
     },
   },
 

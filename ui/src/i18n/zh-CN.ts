@@ -135,6 +135,18 @@ export default {
     updateOk: "已成功为 {name} 触发更新",
     updateError: "触发更新出错（{msg}）",
     refreshContainersError: "刷新容器时出错（{msg}）",
+    // 上游 9.5.0 官方徽章 + 文档 / 发布说明 / 源码快捷入口
+    official: "官方",
+    officialDockerImage: "官方 Docker 镜像",
+    documentation: "文档",
+    docs: "文档",
+    releaseNotes: "发布说明",
+    releaseNotesTag: "发布说明（{tag}）",
+    changelog: "更新日志",
+    sourceCode: "源代码",
+    sourceCodeLower: "源代码",
+    source: "源码",
+    viewReleaseNotes: "查看 {version} 的发布说明",
   },
   home: {
     brand: "What's Up Docker?",
@@ -171,6 +183,13 @@ export default {
     link: "链接",
     osArch: "操作系统 / 架构",
     created: "创建时间",
+    // 上游 9.5.0：「链接模板 / 链接」两行被下面这些替换
+    official: "官方",
+    officialDockerImage: "官方 Docker 镜像",
+    documentation: "文档",
+    releaseNotes: "发布说明",
+    changelog: "更新日志",
+    sourceCode: "源代码",
   },
   filter: {
     containers: "容器",
