@@ -29,4 +29,5 @@ description: Unreleased changes and upcoming features in WUD (What's Up Docker?)
 - 🐛 [WATCHER] Honour the stored watch preference during targeted reconciliation so a restarted container is not pruned from the store
 - 🐛 [WATCHER] Normalize aarch64 to arm64 in Swarm watcher (fixes #1401)
 - 📚 [TRIGGER] Document self-update configuration options for Docker Compose trigger (fixes #1414)
+
 ---
