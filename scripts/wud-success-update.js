@@ -65,10 +65,20 @@ const TO =
   process.env.WUD_TRIGGER_SMTP_MAIL_TO ||
   process.env.MAIL_TO ||
   '<YOUR_EMAIL>';
-const FROM =
+// 发件人：WUD 原生 SMTP trigger 用 FROM_NAME + FROM_ADDRESS 拼成
+// `"WUD" <dcchen@88.com>`，所以收件端显示 WUD。这里必须同样拼上显示名，
+// 否则只传裸地址，邮件客户端会按地址本地部分显示成 `dcchen`，
+// 导致同一套通知出现两种署名。
+const RAW_FROM =
   process.env.WUD_TRIGGER_SMTP_MAIL_FROM_ADDRESS ||
   process.env.MAIL_FROM ||
-  'WUD <YOUR_EMAIL>';
+  '';
+const FROM_NAME = process.env.WUD_TRIGGER_SMTP_MAIL_FROM_NAME || 'WUD';
+const FROM = RAW_FROM
+  ? RAW_FROM.includes('<')
+    ? RAW_FROM // 已是 "Name <addr>" 形式，原样使用
+    : `"${FROM_NAME}" <${RAW_FROM}>`
+  : `"${FROM_NAME}" <YOUR_EMAIL>`;
 // 大镜像（如 ollama 5.46GB）拉取慢，窗口放宽到 35min
 const DEADLINE_MS = 35 * 60 * 1000;
 // 冷却期：同一容器的重复触发在这个窗口内一律忽略
