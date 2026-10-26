@@ -33,4 +33,4 @@ Feature: Prometheus exposure
       | hub_homeassistant_202161 | hub.public   | https://registry-1.docker.io/v2                         | homeassistant/home-assistant | 2021.6.1          | \d{4}\.\d+\.\d+     | false           |
       | hub_nginx_latest         | hub.public   | https://registry-1.docker.io/v2                         | library/nginx                | latest            | latest             | true            |
       | lscr_radarr              | lscr.private | https://lscr.io/v2                                      | linuxserver/radarr           | 1.0.0.1-ls1       | \d+\.\d+\.\d+\.\d+-ls\d+ | true            |
-      | quay_prometheus          | quay.public  | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v3.15.0            | true            |
+      | quay_prometheus          | quay.public  | https://quay.io/v2                                      | prometheus/prometheus        | v2.52.0           | v\d+\.\d+\.\d+   | true            |
