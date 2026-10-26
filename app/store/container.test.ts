@@ -88,6 +88,18 @@ describe('Container Store (SQLite)', () => {
         expect(history[1].tag).toBe('1.1.0');
     });
 
+    test('updateContainer should pass the previous container version to the event', () => {
+        container.insertContainer(sampleContainer);
+
+        const spyEvent = jest.spyOn(event, 'emitContainerUpdated');
+        container.updateContainer({ ...sampleContainer, name: 'renamed' });
+
+        expect(spyEvent).toHaveBeenCalledWith(
+            expect.objectContaining({ name: 'renamed' }),
+            expect.objectContaining({ name: 'test' }),
+        );
+    });
+
     test('updateContainer with same result should touch timestamp without duplicating history', () => {
         container.insertContainer(sampleContainer);
 
@@ -465,5 +477,28 @@ describe('Container Store (SQLite)', () => {
             version: '2.0',
             release: 'candidate',
         });
+    });
+
+    test('getContainers and getContainer should gracefully handle invalid documentationUrl in labels or corrupt DB rows without crashing', () => {
+        const rawWithInvalidDoc = {
+            ...sampleContainer,
+            id: 'container-corrupt-doc',
+            labels: {
+                'wud.link.doc': 'not-a-valid-uri',
+            },
+        };
+
+        expect(() =>
+            container.insertContainer(rawWithInvalidDoc),
+        ).not.toThrow();
+
+        const fetched = container.getContainer('container-corrupt-doc');
+        expect(fetched).toBeDefined();
+        expect(fetched?.documentationUrl).toBeUndefined();
+
+        const allContainers = container.getContainers();
+        expect(
+            allContainers.some((c) => c.id === 'container-corrupt-doc'),
+        ).toBe(true);
     });
 });

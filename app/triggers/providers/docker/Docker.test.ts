@@ -8,6 +8,9 @@ import Docker, {
     createPullProgressLogger,
     isPullRateLimited,
     getPullRetryAfterMs,
+    getEndpointIPv4Address,
+    isDockerGeneratedMacAddress,
+    shouldForwardMacAddress,
 } from './Docker';
 import { HookManager } from '../../hooks/HookManager';
 import log from '../../../log';
@@ -125,7 +128,7 @@ jest.mock('../../../registry', () => ({
                     withPullPermit: (pull) => pull(),
                     deferPulls: () => undefined,
                     getImageFullName: (image, tagOrDigest) =>
-                        `${image.registry.url}/${image.name}:${tagOrDigest}`,
+                        `${image.registry.url}/${image.name}${tagOrDigest && tagOrDigest.includes(':') ? '@' : ':'}${tagOrDigest}`,
                 },
             },
         };
@@ -141,6 +144,7 @@ test('validateConfiguration should return validated configuration when valid', a
         docker.validateConfiguration(configurationValid);
     expect(validatedConfiguration).toStrictEqual({
         ...configurationValid,
+        preload: false,
         rollbacktitle: Trigger.DEFAULT_ROLLBACK_TITLE,
         events: ['available'],
         successtitle: 'Update SUCCESS for ${container.name}',
@@ -814,6 +818,312 @@ test('clone should remove hostname and exposed ports when network mode is contai
     expect(clone.Hostname).toBeUndefined();
     expect(clone.ExposedPorts).toBeUndefined();
     expect(clone.HostConfig.NetworkMode).toEqual('container:sidecar');
+});
+
+describe('MAC address handling on recreate (#1461)', () => {
+    // Docker derives the MAC of a bridge endpoint from its IPv4 address: 02:42:<ip as hex>
+    const generatedFor = (ip) =>
+        `02:42:${ip
+            .split('.')
+            .map((o) => Number(o).toString(16).padStart(2, '0'))
+            .join(':')}`;
+
+    describe('getEndpointIPv4Address', () => {
+        test('should prefer the live address over the IPAM request', () => {
+            expect(
+                getEndpointIPv4Address({
+                    IPAddress: '172.19.0.6',
+                    IPAMConfig: { IPv4Address: '172.19.0.50' },
+                }),
+            ).toEqual('172.19.0.6');
+        });
+
+        test('should fall back to the IPAM request when the container is stopped', () => {
+            expect(
+                getEndpointIPv4Address({
+                    IPAddress: '',
+                    IPAMConfig: { IPv4Address: '172.19.0.50' },
+                }),
+            ).toEqual('172.19.0.50');
+        });
+
+        test('should return undefined when there is no IPv4 address', () => {
+            expect(getEndpointIPv4Address(undefined)).toBeUndefined();
+            expect(getEndpointIPv4Address({ IPAddress: '' })).toBeUndefined();
+            expect(
+                getEndpointIPv4Address({
+                    GlobalIPv6Address: 'fd00::6',
+                    IPAMConfig: { IPv6Address: 'fd00::6' },
+                }),
+            ).toBeUndefined();
+        });
+    });
+
+    describe('isDockerGeneratedMacAddress', () => {
+        test('should recognize the MAC Docker derives from the IPv4 address', () => {
+            expect(
+                isDockerGeneratedMacAddress('02:42:ac:13:00:0c', '172.19.0.12'),
+            ).toBe(true);
+            expect(
+                isDockerGeneratedMacAddress('02:42:AC:13:00:0C', '172.19.0.12'),
+            ).toBe(true);
+            expect(
+                isDockerGeneratedMacAddress(
+                    '02:42:c0:a8:01:e7',
+                    '192.168.1.231',
+                ),
+            ).toBe(true);
+        });
+
+        test('should not match a MAC derived from a different address', () => {
+            expect(
+                isDockerGeneratedMacAddress('02:42:ac:13:00:0c', '172.19.0.6'),
+            ).toBe(false);
+        });
+
+        test('should not match a user-configured MAC', () => {
+            expect(
+                isDockerGeneratedMacAddress('de:ad:be:ef:00:01', '172.19.0.12'),
+            ).toBe(false);
+            expect(
+                isDockerGeneratedMacAddress('02:42:ac:13:00:0d', '172.19.0.12'),
+            ).toBe(false);
+        });
+
+        test('should return false when the MAC or the address is missing or malformed', () => {
+            expect(isDockerGeneratedMacAddress(undefined, '172.19.0.12')).toBe(
+                false,
+            );
+            expect(isDockerGeneratedMacAddress('', '172.19.0.12')).toBe(false);
+            expect(
+                isDockerGeneratedMacAddress('02:42:ac:13:00:0c', undefined),
+            ).toBe(false);
+            expect(isDockerGeneratedMacAddress('02:42:ac:13:00:0c', '')).toBe(
+                false,
+            );
+            expect(
+                isDockerGeneratedMacAddress('02:42:ac:13:00:0c', 'fd00::c'),
+            ).toBe(false);
+            expect(
+                isDockerGeneratedMacAddress('02:42:ac:13:00:0c', '172.19.0'),
+            ).toBe(false);
+            expect(
+                isDockerGeneratedMacAddress(
+                    '02:42:ac:13:00:0c',
+                    '172.19.0.999',
+                ),
+            ).toBe(false);
+        });
+    });
+
+    describe('shouldForwardMacAddress', () => {
+        test('should drop a Docker-generated MAC', () => {
+            expect(
+                shouldForwardMacAddress('02:42:ac:13:00:0c', '172.19.0.12'),
+            ).toBe(false);
+        });
+
+        test('should keep a user-configured MAC', () => {
+            expect(
+                shouldForwardMacAddress('de:ad:be:ef:00:01', '172.19.0.12'),
+            ).toBe(true);
+        });
+
+        test('should keep a MAC when the address is unknown (cannot prove it was generated)', () => {
+            expect(
+                shouldForwardMacAddress('02:42:ac:13:00:0c', undefined),
+            ).toBe(true);
+        });
+
+        test('should not forward an empty MAC', () => {
+            expect(shouldForwardMacAddress(undefined, '172.19.0.12')).toBe(
+                false,
+            );
+            expect(shouldForwardMacAddress('', '172.19.0.12')).toBe(false);
+        });
+    });
+
+    describe('cloneContainer', () => {
+        const inspectWith = (networks, config = {}) => ({
+            Name: '/sonarr',
+            Id: 'abcdef123456',
+            HostConfig: { NetworkMode: 'media' },
+            Config: { Image: 'lscr.io/linuxserver/sonarr:latest', ...config },
+            NetworkSettings: { Networks: networks },
+        });
+
+        test('should drop the Docker-generated MAC of a bridge endpoint so the new container derives its own', () => {
+            const clone = docker.cloneContainer(
+                inspectWith({
+                    media: {
+                        IPAddress: '172.19.0.12',
+                        MacAddress: generatedFor('172.19.0.12'),
+                        Aliases: ['abcdef123456', 'sonarr'],
+                    },
+                }),
+                'lscr.io/linuxserver/sonarr:latest',
+            );
+            expect(
+                clone.NetworkingConfig.EndpointsConfig.media.MacAddress,
+            ).toBeUndefined();
+            expect(
+                clone.NetworkingConfig.EndpointsConfig.media.Aliases,
+            ).toEqual(['sonarr']);
+            expect(clone.MacAddress).toBeUndefined();
+        });
+
+        test('should drop the generated MAC on every endpoint of a multi-network container', () => {
+            const clone = docker.cloneContainer(
+                inspectWith({
+                    media: {
+                        IPAddress: '172.19.0.12',
+                        MacAddress: generatedFor('172.19.0.12'),
+                    },
+                    management: {
+                        IPAddress: '172.20.0.5',
+                        MacAddress: generatedFor('172.20.0.5'),
+                    },
+                }),
+                'lscr.io/linuxserver/sonarr:latest',
+            );
+            expect(
+                clone.NetworkingConfig.EndpointsConfig.media.MacAddress,
+            ).toBeUndefined();
+            expect(
+                clone.NetworkingConfig.EndpointsConfig.management.MacAddress,
+            ).toBeUndefined();
+        });
+
+        test('should keep a user-configured MAC (mac_address / macvlan DHCP reservation)', () => {
+            const clone = docker.cloneContainer(
+                inspectWith({
+                    lan: {
+                        IPAddress: '192.168.1.50',
+                        MacAddress: 'de:ad:be:ef:00:01',
+                    },
+                }),
+                'lscr.io/linuxserver/sonarr:latest',
+            );
+            expect(
+                clone.NetworkingConfig.EndpointsConfig.lan.MacAddress,
+            ).toEqual('de:ad:be:ef:00:01');
+        });
+
+        test('should keep the MAC of an endpoint whose IPv4 address is unknown', () => {
+            const clone = docker.cloneContainer(
+                inspectWith({
+                    v6only: {
+                        IPAddress: '',
+                        GlobalIPv6Address: 'fd00::c',
+                        MacAddress: '02:42:ac:13:00:0c',
+                    },
+                }),
+                'lscr.io/linuxserver/sonarr:latest',
+            );
+            expect(
+                clone.NetworkingConfig.EndpointsConfig.v6only.MacAddress,
+            ).toEqual('02:42:ac:13:00:0c');
+        });
+
+        test('should drop the legacy Config.MacAddress when it was generated for one of the endpoints', () => {
+            const clone = docker.cloneContainer(
+                inspectWith(
+                    {
+                        media: {
+                            IPAddress: '172.19.0.12',
+                            MacAddress: generatedFor('172.19.0.12'),
+                        },
+                    },
+                    { MacAddress: generatedFor('172.19.0.12') },
+                ),
+                'lscr.io/linuxserver/sonarr:latest',
+            );
+            expect(clone.MacAddress).toBeUndefined();
+        });
+
+        test('should keep the legacy Config.MacAddress when the user set it', () => {
+            const clone = docker.cloneContainer(
+                inspectWith(
+                    {
+                        media: {
+                            IPAddress: '172.19.0.12',
+                            MacAddress: 'de:ad:be:ef:00:01',
+                        },
+                    },
+                    { MacAddress: 'de:ad:be:ef:00:01' },
+                ),
+                'lscr.io/linuxserver/sonarr:latest',
+            );
+            expect(clone.MacAddress).toEqual('de:ad:be:ef:00:01');
+            expect(
+                clone.NetworkingConfig.EndpointsConfig.media.MacAddress,
+            ).toEqual('de:ad:be:ef:00:01');
+        });
+
+        test('should leave endpoints without a MAC untouched', () => {
+            const clone = docker.cloneContainer(
+                inspectWith({
+                    media: { IPAddress: '172.19.0.12', Aliases: ['sonarr'] },
+                }),
+                'lscr.io/linuxserver/sonarr:latest',
+            );
+            expect(clone.NetworkingConfig.EndpointsConfig.media).toEqual({
+                IPAddress: '172.19.0.12',
+                Aliases: ['sonarr'],
+            });
+        });
+    });
+
+    describe('sanitizeEndpointConfig', () => {
+        test('should drop a Docker-generated MAC', () => {
+            const sanitized = docker.sanitizeEndpointConfig(
+                {
+                    IPAddress: '172.19.0.12',
+                    MacAddress: generatedFor('172.19.0.12'),
+                    Aliases: ['sonarr'],
+                },
+                'abcdef123456',
+            );
+            expect(sanitized.MacAddress).toBeUndefined();
+            expect(sanitized.Aliases).toEqual(['sonarr']);
+        });
+
+        test('should keep a user-configured MAC', () => {
+            const sanitized = docker.sanitizeEndpointConfig(
+                {
+                    IPAddress: '172.19.0.12',
+                    MacAddress: 'de:ad:be:ef:00:01',
+                },
+                'abcdef123456',
+            );
+            expect(sanitized.MacAddress).toEqual('de:ad:be:ef:00:01');
+        });
+
+        test('should judge the MAC of a stopped container by its static IPAM address', () => {
+            // generated for the requested static IP => still Docker's own, drop it
+            expect(
+                docker.sanitizeEndpointConfig(
+                    {
+                        IPAddress: '',
+                        IPAMConfig: { IPv4Address: '172.19.0.50' },
+                        MacAddress: generatedFor('172.19.0.50'),
+                    },
+                    'abcdef123456',
+                ).MacAddress,
+            ).toBeUndefined();
+            // user-chosen MAC on a static IP => keep
+            expect(
+                docker.sanitizeEndpointConfig(
+                    {
+                        IPAddress: '',
+                        IPAMConfig: { IPv4Address: '172.19.0.50' },
+                        MacAddress: 'de:ad:be:ef:00:01',
+                    },
+                    'abcdef123456',
+                ).MacAddress,
+            ).toEqual('de:ad:be:ef:00:01');
+        });
+    });
 });
 
 describe('reconcileEnv', () => {
@@ -2879,5 +3189,185 @@ describe('pull rate limiting', () => {
         expect(events[0]).toBe('deferPulls:1500');
         expect(events[1]).toBe('pull2Started');
         expect(events[2]).toBe('pull1Retried');
+    });
+
+    describe('preload', () => {
+        let pullImageSpy;
+
+        beforeEach(() => {
+            pullImageSpy = jest
+                .spyOn(docker, 'pullImage')
+                .mockResolvedValue(undefined);
+        });
+
+        test('supportsPreload should return true', () => {
+            expect(docker.supportsPreload()).toBe(true);
+        });
+
+        test('preload should skip when updateAvailable is false', async () => {
+            const container = {
+                id: '123456789',
+                name: 'test-app',
+                watcher: 'test',
+                updateAvailable: false,
+                image: {
+                    name: 'test',
+                    tag: { value: '1.0.0', semver: true },
+                    registry: { name: 'hub', url: 'hub.docker.com' },
+                },
+                result: { tag: '1.1.0' },
+            };
+            await docker.preload(container);
+            expect(pullImageSpy).not.toHaveBeenCalled();
+            expect(container.result.preloaded).toBeUndefined();
+        });
+
+        test('preload should skip when hasResolvableUpdate is false', async () => {
+            const container = {
+                id: '123456789',
+                name: 'test-app',
+                watcher: 'test',
+                updateAvailable: true,
+                updateKind: { kind: 'tag', remoteValue: '1.0.0' },
+                image: {
+                    name: 'test',
+                    tag: { value: '1.0.0', semver: true },
+                    registry: { name: 'hub', url: 'hub.docker.com' },
+                },
+                result: { tag: '1.0.0' },
+            };
+            await docker.preload(container);
+            expect(pullImageSpy).not.toHaveBeenCalled();
+            expect(container.result.preloaded).toBeUndefined();
+        });
+
+        test('preload should throw when watcher is missing', async () => {
+            const container = {
+                id: '123456789',
+                name: 'test-app',
+                watcher: 'unknown',
+                updateAvailable: true,
+                updateKind: { kind: 'tag', remoteValue: '1.1.0' },
+                image: {
+                    name: 'test',
+                    tag: { value: '1.0.0', semver: true },
+                    registry: { name: 'hub', url: 'hub.docker.com' },
+                },
+                result: { tag: '1.1.0' },
+            };
+            await expect(docker.preload(container)).rejects.toThrow(
+                /Watcher unknown not found/,
+            );
+        });
+
+        test('preload should pull candidate tag for semver image and mark preloaded', async () => {
+            const container = {
+                id: '123456789',
+                name: 'test-app',
+                watcher: 'test',
+                updateAvailable: true,
+                updateKind: {
+                    kind: 'tag',
+                    remoteValue: '1.1.0',
+                    semverDiff: 'minor',
+                },
+                image: {
+                    name: 'test',
+                    tag: { value: '1.0.0', semver: true },
+                    digest: { watch: false },
+                    registry: { name: 'hub', url: 'hub.docker.com' },
+                },
+                result: { tag: '1.1.0' },
+            };
+            await docker.preload(container);
+            expect(pullImageSpy).toHaveBeenCalledWith(
+                expect.anything(),
+                undefined,
+                'hub.docker.com/test:1.1.0',
+                expect.anything(),
+                expect.anything(),
+            );
+            expect(container.result.preloaded).toBe(true);
+        });
+
+        test('preload should pull by manifest digest for floating tag image', async () => {
+            const container = {
+                id: '123456789',
+                name: 'test-app',
+                watcher: 'test',
+                updateAvailable: true,
+                updateKind: {
+                    kind: 'digest',
+                    remoteValue: 'sha256:remote-digest-123',
+                },
+                image: {
+                    name: 'test',
+                    tag: { value: 'latest', semver: false },
+                    digest: { watch: false, value: 'sha256:local-digest-000' },
+                    registry: { name: 'hub', url: 'hub.docker.com' },
+                },
+                result: { tag: 'latest', digest: 'sha256:remote-digest-123' },
+            };
+            await docker.preload(container);
+            expect(pullImageSpy).toHaveBeenCalledWith(
+                expect.anything(),
+                undefined,
+                'hub.docker.com/test@sha256:remote-digest-123',
+                expect.anything(),
+                expect.anything(),
+            );
+            expect(container.result.preloaded).toBe(true);
+        });
+
+        test('preload should pull by manifest digest when digest watch is enabled on semver image', async () => {
+            const container = {
+                id: '123456789',
+                name: 'test-app',
+                watcher: 'test',
+                updateAvailable: true,
+                updateKind: {
+                    kind: 'digest',
+                    remoteValue: 'sha256:digest-abc',
+                },
+                image: {
+                    name: 'test',
+                    tag: { value: '1.0.0', semver: true },
+                    digest: { watch: true, value: 'sha256:digest-old' },
+                    registry: { name: 'hub', url: 'hub.docker.com' },
+                },
+                result: { tag: '1.0.0', digest: 'sha256:digest-abc' },
+            };
+            await docker.preload(container);
+            expect(pullImageSpy).toHaveBeenCalledWith(
+                expect.anything(),
+                undefined,
+                'hub.docker.com/test@sha256:digest-abc',
+                expect.anything(),
+                expect.anything(),
+            );
+            expect(container.result.preloaded).toBe(true);
+        });
+
+        test('preload should never call container stop, remove, or createContainer', async () => {
+            const watcher = docker.getWatcher({ watcher: 'test' });
+            const createSpy = jest.spyOn(watcher.dockerApi, 'createContainer');
+
+            const container = {
+                id: '123456789',
+                name: 'test-app',
+                watcher: 'test',
+                updateAvailable: true,
+                updateKind: { kind: 'tag', remoteValue: '1.1.0' },
+                image: {
+                    name: 'test',
+                    tag: { value: '1.0.0', semver: true },
+                    registry: { name: 'hub', url: 'hub.docker.com' },
+                },
+                result: { tag: '1.1.0' },
+            };
+
+            await docker.preload(container);
+            expect(createSpy).not.toHaveBeenCalled();
+        });
     });
 });

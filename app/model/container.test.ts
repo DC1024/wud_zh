@@ -849,6 +849,47 @@ describe('cool-down delay logic', () => {
         expect(validated.isCoolingDown).toBe(true);
         expect(validated.updateAvailable).toBe(false);
     });
+
+    test('should allow overriding cool-down to make updateAvailable=true and compute updateKind', () => {
+        const releaseTime = new Date(Date.now() - 3600 * 1000).toISOString();
+        const validated = container.validate({
+            ...baseContainer,
+            delay: '24h',
+            overrideCooldown: true,
+            result: {
+                tag: '2.0.0',
+                created: releaseTime,
+            },
+        });
+
+        expect(validated.isCoolingDown).toBe(true);
+        expect(validated.overrideCooldown).toBe(true);
+        expect(validated.updateAvailable).toBe(true);
+        expect(validated.updateKind.kind).toBe('tag');
+        expect(validated.updateKind.semverDiff).toBe('major');
+        expect(validated.updateKind.remoteValue).toBe('2.0.0');
+    });
+
+    test('should support dynamically overriding cool-down on an existing container instance', () => {
+        const releaseTime = new Date(Date.now() - 3600 * 1000).toISOString();
+        const validated = container.validate({
+            ...baseContainer,
+            delay: '24h',
+            result: {
+                tag: '2.0.0',
+                created: releaseTime,
+            },
+        });
+
+        expect(validated.isCoolingDown).toBe(true);
+        expect(validated.updateAvailable).toBe(false);
+        expect(validated.updateKind.kind).toBe('unknown');
+
+        validated.overrideCooldown = true;
+        expect(validated.updateAvailable).toBe(true);
+        expect(validated.updateKind.kind).toBe('tag');
+        expect(validated.updateKind.semverDiff).toBe('major');
+    });
 });
 
 describe('rich container metadata', () => {
@@ -1058,15 +1099,14 @@ describe('rich container metadata', () => {
             expect(resolved.link).toBe('https://legacy-link.com');
         });
 
-        test('should fail validation when documentationUrl is not a valid URI', () => {
+        test('should ignore invalid documentationUrl and not fail validation when documentationUrl is not a valid URI', () => {
             const raw = {
                 ...createBase(),
                 documentationUrl: 'not-a-valid-uri',
             };
 
-            expect(() => container.validate(raw)).toThrow(
-                /Error when validating container properties/,
-            );
+            const validated = container.validate(raw);
+            expect(validated.documentationUrl).toBeUndefined();
         });
 
         test('should allow re-validating a container with linkTemplate multiple times without throwing', () => {

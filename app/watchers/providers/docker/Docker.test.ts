@@ -2480,6 +2480,46 @@ describe('Docker Watcher', () => {
             expect(result).toEqual({ tag: '1.3' });
         });
 
+        test('should allow candidate tags with different number of semver parts when includeTags is defined (fixes #1465)', () => {
+            mockTag.parse.mockImplementation(
+                jest.requireActual('../../../tag').parse,
+            );
+            mockTag.isGreater.mockImplementation(
+                jest.requireActual('../../../tag').isGreater,
+            );
+            const containerWithInclude = {
+                image: {
+                    tag: { value: '10.11.11-ls123', semver: true },
+                },
+                includeTags: '^(10\\.\\d+\\.\\d+|12\\.\\d+)-ls\\d+$',
+            };
+            const tags = [
+                '10.11.10-ls123',
+                '10.11.12-ls123',
+                '12.0-ls123',
+                '13.0.0-ls123',
+            ];
+            const logMock = { warn: jest.fn() };
+            const candidates = getTagCandidates(
+                containerWithInclude,
+                tags,
+                logMock,
+            );
+            expect(candidates).toEqual(['12.0-ls123', '10.11.12-ls123']);
+
+            const containerWithoutInclude = {
+                image: {
+                    tag: { value: '10.11.11-ls123', semver: true },
+                },
+            };
+            const candidatesWithoutInclude = getTagCandidates(
+                containerWithoutInclude,
+                ['10.11.12-ls123', '12.0-ls123'],
+                logMock,
+            );
+            expect(candidatesWithoutInclude).toEqual(['10.11.12-ls123']);
+        });
+
         test('should not propose a tag that transforms to the same version as the current one', async () => {
             const container = {
                 includeTags: '^4.5.\\d+-ls\\d+$',
@@ -3280,6 +3320,51 @@ describe('Docker Watcher', () => {
                 expect.stringContaining('Cannot get a reliable tag'),
             );
             expect(result).toBeUndefined();
+        });
+
+        test('should fallback to container.Config.Image when RepoTags is empty', async () => {
+            await docker.register('watcher', 'docker', 'test', {});
+            const mockLog = {
+                info: jest.fn(),
+                warn: jest.fn(),
+                debug: jest.fn(),
+            };
+            docker.log = mockLog;
+            const container = {
+                Id: '123',
+                Image: 'sha256:abcdef123456',
+                Names: ['/test'],
+                State: 'running',
+                Labels: {},
+            };
+            const imageDetails = {
+                Id: 'sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+                RepoTags: [],
+                Architecture: 'amd64',
+                Os: 'linux',
+            };
+            mockImage.inspect.mockResolvedValue(imageDetails);
+            mockContainer.inspect.mockResolvedValue({
+                Config: {
+                    Image: 'my-org/my-app:latest',
+                },
+            });
+            mockParse.mockReturnValue({
+                path: 'my-org/my-app',
+                tag: 'latest',
+            });
+
+            const result = await docker.addImageDetailsToContainer(container);
+
+            expect(mockLog.info).toHaveBeenCalledWith(
+                expect.stringContaining(
+                    'recovering image name from container config [my-org/my-app:latest]',
+                ),
+            );
+            expect(mockParse).toHaveBeenCalledWith('my-org/my-app:latest');
+            expect(result).toBeDefined();
+            expect(result.image.name).toBe('my-org/my-app');
+            expect(result.image.tag.value).toBe('latest');
         });
 
         test('should warn for non-semver without digest watching', async () => {
@@ -5553,6 +5638,367 @@ describe('Docker Watcher', () => {
                 expect(gauge.set).toHaveBeenCalledWith(
                     { type: 'docker', name: 'test' },
                     1,
+                );
+            });
+
+            test('addImageDetailsToContainer should read labels from Config.Labels when inspecting (#1435)', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                mockContainer.inspect = jest.fn().mockResolvedValue({
+                    Id: 'inspect-123',
+                    Config: {
+                        Labels: {
+                            'wud.tag.include': '^1\\.',
+                            'wud.link.changelog':
+                                'https://example.com/changelog',
+                        },
+                    },
+                });
+                mockDockerApi.getImage.mockReturnValue({
+                    inspect: jest.fn().mockResolvedValue({
+                        Id: 'sha256:img123',
+                        Architecture: 'amd64',
+                        Os: 'linux',
+                        RepoTags: ['myorg/myimage:1.0.0'],
+                    }),
+                });
+                mockParse.mockReturnValue({
+                    domain: 'docker.io',
+                    path: 'myorg/myimage',
+                    tag: '1.0.0',
+                });
+                storeContainer.getContainer.mockReturnValue(undefined);
+
+                const inspectObj = {
+                    Id: 'inspect-123',
+                    Name: '/my-inspect-app',
+                    Image: 'myorg/myimage:1.0.0',
+                    Config: {
+                        Labels: {
+                            'wud.tag.include': '^1\\.',
+                            'wud.link.changelog':
+                                'https://example.com/changelog',
+                        },
+                    },
+                };
+
+                const res = await docker.addImageDetailsToContainer(inspectObj);
+                expect(res).toBeDefined();
+                expect(res.labels).toEqual(inspectObj.Config.Labels);
+            });
+
+            test('reconcileStoreContainers should prune dead containers from store that no longer exist in Docker (#1440)', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                docker.pruneContainerFromStore = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                storeContainer.getContainers.mockReturnValue([
+                    { id: 'alive-1', name: 'app-alive' },
+                    { id: 'dead-1', name: 'app-dead' },
+                ]);
+                mockDockerApi.listContainers.mockResolvedValue([
+                    { Id: 'alive-1' },
+                ]);
+
+                await docker.reconcileStoreContainers();
+
+                expect(docker.pruneContainerFromStore).toHaveBeenCalledWith(
+                    'dead-1',
+                );
+                expect(docker.pruneContainerFromStore).not.toHaveBeenCalledWith(
+                    'alive-1',
+                );
+            });
+
+            test('reconcileStoreContainers should reconcile active containers missing from store (#1466)', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                docker.pruneContainerFromStore = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                docker.reconcileContainer = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                storeContainer.getContainers.mockReturnValue([
+                    { id: 'alive-1', name: 'app-alive' },
+                ]);
+                mockDockerApi.listContainers.mockResolvedValue([
+                    { Id: 'alive-1' },
+                    { Id: 'new-1' },
+                ]);
+
+                await docker.reconcileStoreContainers();
+
+                expect(docker.reconcileContainer).toHaveBeenCalledWith('new-1');
+                expect(docker.reconcileContainer).not.toHaveBeenCalledWith(
+                    'alive-1',
+                );
+                expect(docker.pruneContainerFromStore).not.toHaveBeenCalled();
+            });
+
+            test('reconcileStoreContainers should both prune dead containers and reconcile new containers (#1466)', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                docker.pruneContainerFromStore = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                docker.reconcileContainer = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                storeContainer.getContainers.mockReturnValue([
+                    { id: 'alive-1', name: 'app-alive' },
+                    { id: 'dead-1', name: 'app-dead' },
+                ]);
+                mockDockerApi.listContainers.mockResolvedValue([
+                    { Id: 'alive-1' },
+                    { Id: 'new-1' },
+                ]);
+
+                await docker.reconcileStoreContainers();
+
+                expect(docker.pruneContainerFromStore).toHaveBeenCalledWith(
+                    'dead-1',
+                );
+                expect(docker.pruneContainerFromStore).not.toHaveBeenCalledWith(
+                    'alive-1',
+                );
+                expect(docker.reconcileContainer).toHaveBeenCalledWith('new-1');
+                expect(docker.reconcileContainer).not.toHaveBeenCalledWith(
+                    'alive-1',
+                );
+            });
+
+            test('reconcileStoreContainers should reconcile active containers when store is empty (#1466)', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                docker.reconcileContainer = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                storeContainer.getContainers.mockReturnValue([]);
+                mockDockerApi.listContainers.mockResolvedValue([
+                    { Id: 'new-1' },
+                ]);
+
+                await docker.reconcileStoreContainers();
+
+                expect(docker.reconcileContainer).toHaveBeenCalledWith('new-1');
+            });
+
+            test('reconcileContainer should prune and return undefined if destroyed while in flight (#1442)', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                mockContainer.inspect.mockImplementation(async () => {
+                    // Simulate destroy event arriving while inspect is in flight
+                    await docker.onDockerEvent(
+                        Buffer.from(
+                            JSON.stringify({
+                                Action: 'destroy',
+                                Actor: { ID: 'racing-id' },
+                            }),
+                        ),
+                    );
+                    return {
+                        Id: 'racing-id',
+                        Name: '/racing-app',
+                        Image: 'sha256:abc',
+                        State: { Status: 'running' },
+                        Config: { Labels: {} },
+                    };
+                });
+                docker.pruneContainerFromStore = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+
+                const report = await docker.reconcileContainer('racing-id');
+                expect(report).toBeUndefined();
+                expect(docker.pruneContainerFromStore).toHaveBeenCalledWith(
+                    'racing-id',
+                );
+            });
+
+            test('onDockerEvent rename should trigger reconcileContainer when container was not yet tracked in store (#1442)', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                storeContainer.getContainer.mockReturnValue(undefined);
+                docker.runReconcileContainer = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                mockDockerApi.getContainer.mockReturnValue({
+                    inspect: jest.fn().mockResolvedValue({
+                        Id: 'rename-id',
+                        Name: '/new-name',
+                        State: { Status: 'running' },
+                        Config: { Labels: {} },
+                    }),
+                });
+
+                await docker.onDockerEvent(
+                    Buffer.from(
+                        JSON.stringify({
+                            Action: 'rename',
+                            Actor: {
+                                ID: 'rename-id',
+                                Attributes: { name: 'new-name' },
+                            },
+                        }),
+                    ),
+                );
+
+                expect(docker.runReconcileContainer).toHaveBeenCalledWith(
+                    'rename-id',
+                );
+            });
+
+            test('mapContainerToContainerReport should evaluate changed to true when transitioning out of cooldown (#1445)', () => {
+                docker.register('watcher', 'docker', 'test', {});
+                const containerInDb = {
+                    id: 'cool-id',
+                    updateAvailable: false,
+                    isCoolingDown: true,
+                    resultChanged: jest.fn().mockReturnValue(false),
+                };
+                storeContainer.getContainer.mockReturnValue(containerInDb);
+                storeContainer.updateContainer.mockImplementation((c) => c);
+
+                const containerWithResult = {
+                    id: 'cool-id',
+                    updateAvailable: true,
+                    isCoolingDown: false,
+                };
+
+                const report =
+                    docker.mapContainerToContainerReport(containerWithResult);
+                expect(report.changed).toBe(true);
+            });
+
+            test('mapContainerToContainerReport should evaluate changed to false when updateAvailable remains false during cooldown (#1445)', () => {
+                docker.register('watcher', 'docker', 'test', {});
+                const containerInDb = {
+                    id: 'cool-id',
+                    updateAvailable: false,
+                    isCoolingDown: true,
+                    resultChanged: jest.fn().mockReturnValue(false),
+                };
+                storeContainer.getContainer.mockReturnValue(containerInDb);
+                storeContainer.updateContainer.mockImplementation((c) => c);
+
+                const containerWithResult = {
+                    id: 'cool-id',
+                    updateAvailable: false,
+                    isCoolingDown: true,
+                };
+
+                const report =
+                    docker.mapContainerToContainerReport(containerWithResult);
+                expect(report.changed).toBe(false);
+            });
+
+            test('mapContainerToContainerReport should evaluate changed to false when updateAvailable was already true and result unchanged (#1445)', () => {
+                docker.register('watcher', 'docker', 'test', {});
+                const containerInDb = {
+                    id: 'cool-id',
+                    updateAvailable: true,
+                    isCoolingDown: false,
+                    resultChanged: jest.fn().mockReturnValue(false),
+                };
+                storeContainer.getContainer.mockReturnValue(containerInDb);
+                storeContainer.updateContainer.mockImplementation((c) => c);
+
+                const containerWithResult = {
+                    id: 'cool-id',
+                    updateAvailable: true,
+                    isCoolingDown: false,
+                };
+
+                const report =
+                    docker.mapContainerToContainerReport(containerWithResult);
+                expect(report.changed).toBe(false);
+            });
+        });
+
+        describe('destroyedContainers retention and eviction (#1442)', () => {
+            beforeEach(async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+            });
+
+            test('recordDestroyedContainer should store destroyed container with timestamp', () => {
+                const now = 1000000;
+                docker.recordDestroyedContainer('c-1', now);
+                expect(docker.isContainerDestroyed('c-1', now)).toBe(true);
+            });
+
+            test('isContainerDestroyed should evict container after TTL has expired', () => {
+                const now = 1000000;
+                const ttl = 10 * 60 * 1000;
+                docker.recordDestroyedContainer('c-1', now);
+
+                // Within TTL
+                expect(docker.isContainerDestroyed('c-1', now + ttl - 1)).toBe(
+                    true,
+                );
+
+                // After TTL expires
+                expect(docker.isContainerDestroyed('c-1', now + ttl + 1)).toBe(
+                    false,
+                );
+                expect(docker.destroyedContainers.has('c-1')).toBe(false);
+            });
+
+            test('recordDestroyedContainer should enforce bounded FIFO cap', () => {
+                const now = 1000000;
+                // Add 1005 entries
+                for (let i = 1; i <= 1005; i++) {
+                    docker.recordDestroyedContainer(`c-${i}`, now + i);
+                }
+
+                expect(docker.destroyedContainers.size).toBe(1000);
+                // Oldest 5 entries (c-1 .. c-5) should have been evicted
+                for (let i = 1; i <= 5; i++) {
+                    expect(docker.destroyedContainers.has(`c-${i}`)).toBe(
+                        false,
+                    );
+                }
+                // Newer entries (c-6 .. c-1005) should remain
+                expect(docker.destroyedContainers.has('c-6')).toBe(true);
+                expect(docker.destroyedContainers.has('c-1005')).toBe(true);
+            });
+
+            test('onDockerEvent destroy should record destroyed container and prune from store', async () => {
+                storeContainer.getContainer.mockReturnValue({
+                    id: 'destroyed-123',
+                });
+                const chunk = Buffer.from(
+                    JSON.stringify({
+                        Action: 'destroy',
+                        Actor: {
+                            ID: 'destroyed-123',
+                            Attributes: { name: 'my-service' },
+                        },
+                    }),
+                );
+                await docker.onDockerEvent(chunk);
+                expect(docker.isContainerDestroyed('destroyed-123')).toBe(true);
+                expect(storeContainer.deleteContainer).toHaveBeenCalledWith(
+                    'destroyed-123',
+                );
+            });
+
+            test('onDockerEvent start should clear container from destroyedContainers', async () => {
+                docker.recordDestroyedContainer('restarted-123');
+                expect(docker.isContainerDestroyed('restarted-123')).toBe(true);
+
+                mockDockerApi.getContainer.mockReturnValue({
+                    inspect: jest.fn().mockResolvedValue({
+                        Config: { Labels: {} },
+                    }),
+                });
+
+                const chunk = Buffer.from(
+                    JSON.stringify({
+                        Action: 'start',
+                        Actor: {
+                            ID: 'restarted-123',
+                            Attributes: { name: 'my-service' },
+                        },
+                    }),
+                );
+                await docker.onDockerEvent(chunk);
+                expect(docker.destroyedContainers.has('restarted-123')).toBe(
+                    false,
                 );
             });
         });

@@ -71,6 +71,8 @@ export const EVENTS_INITIAL_BACKOFF_MS = 1000;
 export const EVENTS_MAX_BACKOFF_MS = 60000;
 export const EVENTS_BACKOFF_FACTOR = 2;
 export const EVENTS_JITTER_MS = 1000;
+export const DESTROYED_CONTAINERS_TTL_MS = 10 * 60 * 1000;
+export const DESTROYED_CONTAINERS_MAX_SIZE = 1000;
 
 export interface DockerWatcherConfiguration extends ComponentConfiguration {
     socket: string;
@@ -325,8 +327,8 @@ export function getTagCandidates(
             }
         });
 
-        // Keep only tags with the same number of numeric segments
-        if (currentComponents.version) {
+        // Keep only tags with the same number of numeric segments (when no custom includeTags regex is specified)
+        if (!container.includeTags && currentComponents.version) {
             const referenceGroups = currentComponents.version.split('.').length;
 
             filteredTags = filteredTags.filter((tag) => {
@@ -689,6 +691,13 @@ export class Docker extends Watcher {
             );
         }
 
+        // Startup reconciliation: prune dead containers from store that no longer exist in Docker listContainers()
+        this.reconcileStoreContainers().catch((e) => {
+            this.log.warn(
+                `Error during startup reconciliation: ${formatErrorMessage(e)}`,
+            );
+        });
+
         // listen to docker events
         if (this.configuration.watchevents) {
             this.watchCronDebounced = debounce(
@@ -932,6 +941,127 @@ export class Docker extends Watcher {
         }, delay);
     }
 
+    protected readonly destroyedContainers = new Map<string, number>();
+
+    /**
+     * Record a container as destroyed with timestamp, evicting expired entries and capping size.
+     */
+    protected recordDestroyedContainer(
+        containerId: string,
+        now = Date.now(),
+    ): void {
+        this.pruneExpiredDestroyedContainers(now);
+        while (this.destroyedContainers.size >= DESTROYED_CONTAINERS_MAX_SIZE) {
+            const oldestKey = this.destroyedContainers.keys().next().value;
+            if (oldestKey) {
+                this.destroyedContainers.delete(oldestKey);
+            } else {
+                break;
+            }
+        }
+        this.destroyedContainers.set(containerId, now);
+    }
+
+    /**
+     * Check if a container is recorded as destroyed and not expired.
+     */
+    protected isContainerDestroyed(
+        containerId: string,
+        now = Date.now(),
+    ): boolean {
+        const destroyedAt = this.destroyedContainers.get(containerId);
+        if (destroyedAt === undefined) {
+            return false;
+        }
+        if (now - destroyedAt > DESTROYED_CONTAINERS_TTL_MS) {
+            this.destroyedContainers.delete(containerId);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Prune expired entries from destroyedContainers.
+     */
+    protected pruneExpiredDestroyedContainers(now = Date.now()): void {
+        for (const [id, timestamp] of this.destroyedContainers.entries()) {
+            if (now - timestamp > DESTROYED_CONTAINERS_TTL_MS) {
+                this.destroyedContainers.delete(id);
+            }
+        }
+    }
+
+    /**
+     * Enqueue a task for a specific container to guarantee serialized execution.
+     */
+    protected async enqueueContainerTask<T>(
+        containerId: string,
+        task: () => Promise<T>,
+    ): Promise<T> {
+        const previous =
+            this.containerChecks.get(containerId) ?? Promise.resolve();
+        const next = previous.catch(() => undefined).then(task);
+        this.containerChecks.set(containerId, next);
+        try {
+            return await next;
+        } finally {
+            if (this.containerChecks.get(containerId) === next) {
+                this.containerChecks.delete(containerId);
+            }
+        }
+    }
+
+    /**
+     * Startup reconciliation: prune dead containers from store that no longer exist in Docker,
+     * and reconcile active containers that are missing from store (e.g. created while WUD was stopped).
+     */
+    async reconcileStoreContainers(): Promise<void> {
+        if (isOneshot()) {
+            return;
+        }
+        try {
+            const containersInStore =
+                storeContainer.getContainers({
+                    watcher: this.name,
+                }) || [];
+            const activeContainers = await this.dockerApi.listContainers({
+                all: this.configuration.all,
+            });
+            const activeIds = new Set(
+                (activeContainers || []).map((c: any) => c.Id || c.id),
+            );
+            const storeIds = new Set(containersInStore.map((c) => c.id));
+
+            // Prune dead containers from store that no longer exist in Docker
+            const toPrune = containersInStore.filter(
+                (c) => !activeIds.has(c.id),
+            );
+            for (const container of toPrune) {
+                this.log.info(
+                    `Pruning dead container ${container.name} (${container.id}) from store during startup reconciliation`,
+                );
+                await this.pruneContainerFromStore(container.id);
+            }
+
+            // Index active containers missing from store (e.g. created while WUD was stopped)
+            const toAdd = (activeContainers || []).filter((c: any) => {
+                const id = c.Id || c.id;
+                return id && !storeIds.has(id);
+            });
+            for (const container of toAdd) {
+                const containerId = container.Id || (container as any).id;
+                this.log.info(
+                    `Reconciling active container ${containerId} missing from store during startup reconciliation`,
+                );
+                await this.reconcileContainer(containerId);
+            }
+        } catch (e: any) {
+            this.log.warn(
+                `Failed startup reconciliation of store containers: ${formatErrorMessage(e)}`,
+            );
+        }
+    }
+
     /**
      * Remove a deleted or superseded container from the state store and emit removal events.
      */
@@ -951,124 +1081,138 @@ export class Docker extends Watcher {
         containerId: string,
         options?: ReconcileOptions,
     ): Promise<ContainerReport | undefined> {
-        const previous =
-            this.containerChecks.get(containerId) ?? Promise.resolve();
+        return this.enqueueContainerTask(containerId, () =>
+            this.runReconcileContainer(containerId, options),
+        );
+    }
 
-        const runReconcile = async (): Promise<ContainerReport | undefined> => {
-            if (
-                options?.oldContainerId &&
-                options.oldContainerId !== containerId
-            ) {
-                await this.pruneContainerFromStore(options.oldContainerId);
-            }
-
-            let containerInspect: Dockerode.ContainerInspectInfo;
-            try {
-                containerInspect = await this.dockerApi
-                    .getContainer(containerId)
-                    .inspect();
-            } catch (e: any) {
-                this.log.debug(
-                    `Unable to inspect container id=[${containerId}] during reconcile: ${e.message}`,
-                );
-                await this.pruneContainerFromStore(containerId);
-                return undefined;
-            }
-
-            const containerLabels =
-                containerInspect.Config?.Labels ||
-                (containerInspect as any).Labels ||
-                {};
-            const containerName = getContainerName(containerInspect);
-
-            if (
-                containerName &&
-                (ROLLBACK_ARCHIVE_REGEX.test(containerName) ||
-                    containerName === 'wud-self-update')
-            ) {
-                await this.pruneContainerFromStore(containerId);
-                return undefined;
-            }
-
-            // Same rule as getContainers(): an explicit web preference wins
-            // over `watchbydefault`. Without it, restarting a container that
-            // is only watched through the preference table (no `wud.watch`
-            // label) pruned it from the store until the next full scan.
-            const watchPreferences = storeWatchPreference.getWatchedMap(
-                this.name,
-            );
-            const toWatch = isContainerToWatch(
-                containerLabels[wudWatch] || containerLabels['wud.watch'],
-                this.configuration.watchbydefault,
-                containerName,
-                containerLabels,
-                this.configuration.exclude,
-                this.configuration.include,
-                this.log,
-                containerName ? watchPreferences.get(containerName) : undefined,
-            );
-
-            if (!toWatch) {
-                await this.pruneContainerFromStore(containerId);
-                return undefined;
-            }
-
-            let containerWithImage: Container | undefined;
-            try {
-                const imageDetail = await this.addImageDetailsToContainer(
-                    containerInspect,
-                    containerLabels[wudTagInclude],
-                    containerLabels[wudTagExclude],
-                    containerLabels[wudTagTransform],
-                    containerLabels[wudLinkTemplate],
-                    containerLabels[wudDisplayName],
-                    containerLabels[wudDisplayIcon],
-                    containerLabels[wudTriggerInclude],
-                    containerLabels[wudTriggerExclude],
-                    { forceRefresh: options?.forceRefresh ?? true },
-                );
-                containerWithImage = imageDetail || undefined;
-            } catch (e: any) {
-                const errorDetail = formatErrorMessage(e);
-                this.log.warn(
-                    `Failed to fetch image detail for container ${containerName} (${containerId}) during reconcile: ${errorDetail}`,
-                );
-                return undefined;
-            }
-
-            if (!containerWithImage) {
-                return undefined;
-            }
-
-            const containerReport =
-                await this.checkContainer(containerWithImage);
-
-            const containerGauge = getWatchContainerGauge();
-            if (containerGauge) {
-                const storeCount = storeContainer.getContainers({
-                    watcher: this.name,
-                }).length;
-                containerGauge.set(
-                    {
-                        type: this.type,
-                        name: this.name,
-                    },
-                    storeCount,
-                );
-            }
-
-            return containerReport;
-        };
-
-        const check = previous.catch(() => undefined).then(runReconcile);
-        this.containerChecks.set(containerId, check);
-        try {
-            return await check;
-        } finally {
-            if (this.containerChecks.get(containerId) === check) {
-                this.containerChecks.delete(containerId);
-            }
+    protected async runReconcileContainer(
+        containerId: string,
+        options?: ReconcileOptions,
+    ): Promise<ContainerReport | undefined> {
+        if (this.isContainerDestroyed(containerId)) {
+            await this.pruneContainerFromStore(containerId);
+            return undefined;
         }
+
+        if (options?.oldContainerId && options.oldContainerId !== containerId) {
+            await this.pruneContainerFromStore(options.oldContainerId);
+        }
+
+        let containerInspect: Dockerode.ContainerInspectInfo;
+        try {
+            containerInspect = await this.dockerApi
+                .getContainer(containerId)
+                .inspect();
+        } catch (e: any) {
+            this.log.debug(
+                `Unable to inspect container id=[${containerId}] during reconcile: ${e.message}`,
+            );
+            await this.pruneContainerFromStore(containerId);
+            return undefined;
+        }
+
+        if (this.isContainerDestroyed(containerId)) {
+            await this.pruneContainerFromStore(containerId);
+            return undefined;
+        }
+
+        const containerLabels =
+            containerInspect.Config?.Labels ||
+            (containerInspect as any).Labels ||
+            {};
+        const containerName = getContainerName(containerInspect);
+
+        if (
+            containerName &&
+            (ROLLBACK_ARCHIVE_REGEX.test(containerName) ||
+                containerName === 'wud-self-update')
+        ) {
+            await this.pruneContainerFromStore(containerId);
+            return undefined;
+        }
+
+        // Same rule as getContainers(): an explicit web preference wins
+        // over `watchbydefault`. Without it, restarting a container that
+        // is only watched through the preference table (no `wud.watch`
+        // label) pruned it from the store until the next full scan.
+        const watchPreferences = storeWatchPreference.getWatchedMap(this.name);
+        const toWatch = isContainerToWatch(
+            containerLabels[wudWatch] || containerLabels['wud.watch'],
+            this.configuration.watchbydefault,
+            containerName,
+            containerLabels,
+            this.configuration.exclude,
+            this.configuration.include,
+            this.log,
+            containerName ? watchPreferences.get(containerName) : undefined,
+        );
+
+        if (!toWatch) {
+            await this.pruneContainerFromStore(containerId);
+            return undefined;
+        }
+
+        let containerWithImage: Container | undefined;
+        try {
+            const imageDetail = await this.addImageDetailsToContainer(
+                containerInspect,
+                containerLabels[wudTagInclude],
+                containerLabels[wudTagExclude],
+                containerLabels[wudTagTransform],
+                containerLabels[wudLinkTemplate],
+                containerLabels[wudDisplayName],
+                containerLabels[wudDisplayIcon],
+                containerLabels[wudTriggerInclude],
+                containerLabels[wudTriggerExclude],
+                { forceRefresh: options?.forceRefresh ?? true },
+            );
+            containerWithImage = imageDetail || undefined;
+        } catch (e: any) {
+            const errorDetail = formatErrorMessage(e);
+            this.log.warn(
+                `Failed to fetch image detail for container ${containerName} (${containerId}) during reconcile: ${errorDetail}`,
+            );
+            return undefined;
+        }
+
+        if (!containerWithImage) {
+            return undefined;
+        }
+
+        if (this.isContainerDestroyed(containerId)) {
+            this.log.info(
+                `Container ${containerId} was destroyed while reconcile was in flight, pruning from store`,
+            );
+            await this.pruneContainerFromStore(containerId);
+            return undefined;
+        }
+
+        const containerReport = await this.checkContainer(containerWithImage);
+
+        if (this.isContainerDestroyed(containerId)) {
+            this.log.info(
+                `Container ${containerId} was destroyed while checkContainer was in flight, pruning from store`,
+            );
+            await this.pruneContainerFromStore(containerId);
+            return undefined;
+        }
+
+        const containerGauge = getWatchContainerGauge();
+        if (containerGauge) {
+            const storeCount = storeContainer.getContainers({
+                watcher: this.name,
+            }).length;
+            containerGauge.set(
+                {
+                    type: this.type,
+                    name: this.name,
+                },
+                storeCount,
+            );
+        }
+
+        return containerReport;
     }
 
     /**
@@ -1110,95 +1254,113 @@ export class Docker extends Watcher {
 
         // Targeted single-container reactions
         if (action === 'destroy') {
+            this.recordDestroyedContainer(containerId);
             await this.pruneContainerFromStore(containerId);
+            return;
         } else if (action === 'start') {
+            this.destroyedContainers.delete(containerId);
             await this.reconcileContainer(containerId);
         } else {
-            // Update container state in db if so
-            try {
-                const container =
-                    await this.dockerApi.getContainer(containerId);
-                const containerInspect = await container.inspect();
-                const newStatus = containerInspect.State?.Status;
-                const newName =
-                    getContainerName(containerInspect) ||
-                    (dockerEvent.Actor?.Attributes?.name
-                        ? dockerEvent.Actor.Attributes.name.replace(/\//, '')
-                        : undefined);
-
-                if (newName && ROLLBACK_ARCHIVE_REGEX.test(newName)) {
+            await this.enqueueContainerTask(containerId, async () => {
+                if (this.isContainerDestroyed(containerId)) {
                     return;
                 }
-                const containerFound = storeContainer.getContainer(containerId);
-                if (containerFound) {
-                    // Child logger for the container to process
-                    const logContainer = this.log.child({
-                        container: fullName(containerFound),
-                    });
-                    const oldStatus = containerFound.status;
-                    const oldName = containerFound.name;
-                    const oldDisplayName = containerFound.displayName;
-                    let isUpdated = false;
-
-                    if (newStatus && oldStatus !== newStatus) {
-                        containerFound.status = newStatus;
-                        logContainer.info(
-                            `Status changed from ${oldStatus} to ${newStatus}`,
-                        );
-                        isUpdated = true;
-                    }
-
-                    const inspectLabels =
-                        containerInspect.Config?.Labels ||
-                        (containerInspect as any).Labels;
-                    const explicitDisplayName =
-                        inspectLabels?.[wudDisplayName] ||
-                        (inspectLabels === undefined
-                            ? containerFound.labels?.[wudDisplayName]
+                // Update container state in db if so
+                try {
+                    const container =
+                        await this.dockerApi.getContainer(containerId);
+                    const containerInspect = await container.inspect();
+                    const newStatus = containerInspect.State?.Status;
+                    const newName =
+                        getContainerName(containerInspect) ||
+                        (dockerEvent.Actor?.Attributes?.name
+                            ? dockerEvent.Actor.Attributes.name.replace(
+                                  /\//,
+                                  '',
+                              )
                             : undefined);
 
-                    if (newName && oldName !== newName) {
-                        containerFound.name = newName;
-                        logContainer.info(
-                            `Name changed from ${oldName} to ${newName}`,
-                        );
-                        isUpdated = true;
+                    if (newName && ROLLBACK_ARCHIVE_REGEX.test(newName)) {
+                        return;
                     }
+                    const containerFound =
+                        storeContainer.getContainer(containerId);
+                    if (containerFound) {
+                        // Child logger for the container to process
+                        const logContainer = this.log.child({
+                            container: fullName(containerFound),
+                        });
+                        const oldStatus = containerFound.status;
+                        const oldName = containerFound.name;
+                        const oldDisplayName = containerFound.displayName;
+                        let isUpdated = false;
 
-                    if (explicitDisplayName) {
-                        if (
-                            containerFound.displayName !== explicitDisplayName
-                        ) {
-                            containerFound.displayName = explicitDisplayName;
+                        if (newStatus && oldStatus !== newStatus) {
+                            containerFound.status = newStatus;
+                            logContainer.info(
+                                `Status changed from ${oldStatus} to ${newStatus}`,
+                            );
                             isUpdated = true;
                         }
-                    } else if (newName) {
-                        if (
-                            oldName !== newName ||
-                            oldDisplayName === oldName ||
-                            (oldDisplayName !== undefined &&
-                                oldDisplayName !== newName)
-                        ) {
-                            if (containerFound.displayName !== newName) {
-                                containerFound.displayName = newName;
+
+                        const inspectLabels =
+                            containerInspect.Config?.Labels ||
+                            (containerInspect as any).Labels;
+                        const explicitDisplayName =
+                            inspectLabels?.[wudDisplayName] ||
+                            (inspectLabels === undefined
+                                ? containerFound.labels?.[wudDisplayName]
+                                : undefined);
+
+                        if (newName && oldName !== newName) {
+                            containerFound.name = newName;
+                            logContainer.info(
+                                `Name changed from ${oldName} to ${newName}`,
+                            );
+                            isUpdated = true;
+                        }
+
+                        if (explicitDisplayName) {
+                            if (
+                                containerFound.displayName !==
+                                explicitDisplayName
+                            ) {
+                                containerFound.displayName =
+                                    explicitDisplayName;
                                 isUpdated = true;
                             }
+                        } else if (newName) {
+                            if (
+                                oldName !== newName ||
+                                oldDisplayName === oldName ||
+                                (oldDisplayName !== undefined &&
+                                    oldDisplayName !== newName)
+                            ) {
+                                if (containerFound.displayName !== newName) {
+                                    containerFound.displayName = newName;
+                                    isUpdated = true;
+                                }
+                            }
                         }
-                    }
 
-                    if (inspectLabels) {
-                        containerFound.labels = inspectLabels;
-                    }
+                        if (inspectLabels) {
+                            containerFound.labels = inspectLabels;
+                            resolveContainerMetadata(containerFound);
+                        }
 
-                    if (isUpdated) {
-                        storeContainer.updateContainer(containerFound);
+                        if (isUpdated) {
+                            storeContainer.updateContainer(containerFound);
+                        }
+                    } else if (action === 'rename') {
+                        // Container renamed but not yet tracked in store -> reconcile it now
+                        await this.runReconcileContainer(containerId);
                     }
+                } catch (e: any) {
+                    this.log.debug(
+                        `Unable to get container details for container id=[${containerId}] (${e.message})`,
+                    );
                 }
-            } catch (e: any) {
-                this.log.debug(
-                    `Unable to get container details for container id=[${containerId}] (${e.message})`,
-                );
-            }
+            });
         }
     }
 
@@ -1756,7 +1918,11 @@ export class Docker extends Watcher {
         options?: { forceRefresh?: boolean },
     ) {
         const containerId = container.Id || container.id;
-        const containerLabels = container.Labels || container.labels || {};
+        const containerLabels =
+            container.Config?.Labels ||
+            container.Labels ||
+            container.labels ||
+            {};
         const effectiveTransformTags =
             transformTags ?? containerLabels[wudTagTransform];
         const stack =
@@ -1833,7 +1999,8 @@ export class Docker extends Watcher {
                 const explicitDisplayName =
                     displayName ||
                     containerLabels[wudDisplayName] ||
-                    (container.Labels === undefined &&
+                    (container.Config?.Labels === undefined &&
+                    container.Labels === undefined &&
                     container.labels === undefined
                         ? containerInStore.labels?.[wudDisplayName]
                         : undefined);
@@ -1860,7 +2027,11 @@ export class Docker extends Watcher {
                     }
                 }
 
-                if (container.Labels || container.labels) {
+                if (
+                    container.Config?.Labels ||
+                    container.Labels ||
+                    container.labels
+                ) {
                     containerInStore.labels = containerLabels;
                     resolveContainerMetadata(containerInStore);
                 }
@@ -1945,13 +2116,49 @@ export class Docker extends Watcher {
                     tag && tag !== '<none>:<none>' && !tag.endsWith(':<none>'),
             );
             if (validRepoTags.length === 0) {
-                this.log.warn(
-                    `Cannot get a reliable tag for this image [${imageNameToParse}]`,
-                );
-                return Promise.resolve();
+                let configImage = container.Config?.Image;
+                if (
+                    !configImage &&
+                    this.dockerApi &&
+                    (container.Id || container.id)
+                ) {
+                    try {
+                        const containerInspect = await this.dockerApi
+                            .getContainer(container.Id || container.id)
+                            .inspect();
+                        configImage = containerInspect?.Config?.Image;
+                    } catch {
+                        // ignore inspect error
+                    }
+                }
+                const isConfigImageId =
+                    typeof configImage === 'string' &&
+                    (configImage.startsWith('sha256:') ||
+                        /^[a-f0-9]{64}$/i.test(configImage) ||
+                        (rawImageId !== '' &&
+                            configImage.replace(/^sha256:/, '').length >= 12 &&
+                            /^[a-f0-9]+$/i.test(
+                                configImage.replace(/^sha256:/, ''),
+                            ) &&
+                            rawImageId.startsWith(
+                                configImage.replace(/^sha256:/, ''),
+                            )));
+
+                if (configImage && !isConfigImageId) {
+                    this.log.info(
+                        `Image tags missing from daemon; recovering image name from container config [${configImage}]`,
+                    );
+                    imageNameToParse = configImage;
+                } else {
+                    this.log.warn(
+                        `Cannot get a reliable tag for this image [${imageNameToParse}]`,
+                    );
+                    return Promise.resolve();
+                }
+            } else {
+                // Get the first repo tag (better than nothing ;)
+                [imageNameToParse] = validRepoTags;
             }
-            // Get the first repo tag (better than nothing ;)
-            [imageNameToParse] = validRepoTags;
         }
 
         if (imageNameToParse.includes('@')) {
@@ -2095,9 +2302,20 @@ export class Docker extends Watcher {
         } else {
             containerReport.container =
                 storeContainer.updateContainer(containerWithResult);
+            const isUpdateAvailable = Boolean(
+                containerWithResult.updateAvailable,
+            );
+            const wasUpdateAvailable = Boolean(containerInDb.updateAvailable);
+            const wasCoolingDown = Boolean(containerInDb.isCoolingDown);
+            const transitionedOutOfCooldown =
+                (!wasUpdateAvailable || wasCoolingDown) && isUpdateAvailable;
+            const resultChanged = Boolean(
+                containerInDb.resultChanged &&
+                    containerInDb.resultChanged(containerReport.container),
+            );
             containerReport.changed =
-                containerInDb.resultChanged(containerReport.container) &&
-                containerWithResult.updateAvailable;
+                (resultChanged || transitionedOutOfCooldown) &&
+                isUpdateAvailable;
         }
         return containerReport;
     }

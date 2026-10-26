@@ -769,9 +769,20 @@ export class Swarm extends Watcher {
         } else {
             containerReport.container =
                 storeContainer.updateContainer(containerWithResult);
+            const isUpdateAvailable = Boolean(
+                containerWithResult.updateAvailable,
+            );
+            const wasUpdateAvailable = Boolean(containerInDb.updateAvailable);
+            const wasCoolingDown = Boolean(containerInDb.isCoolingDown);
+            const transitionedOutOfCooldown =
+                (!wasUpdateAvailable || wasCoolingDown) && isUpdateAvailable;
+            const resultChanged = Boolean(
+                containerInDb.resultChanged &&
+                    containerInDb.resultChanged(containerReport.container),
+            );
             containerReport.changed =
-                containerInDb.resultChanged(containerReport.container) &&
-                containerWithResult.updateAvailable;
+                (resultChanged || transitionedOutOfCooldown) &&
+                isUpdateAvailable;
         }
         return containerReport;
     }
@@ -916,8 +927,8 @@ export class Swarm extends Watcher {
                     ) !== null,
             );
 
-            // Keep only tags with the same number of numeric segments
-            if (currentComponents.version) {
+            // Keep only tags with the same number of numeric segments (when no custom includeTags regex is specified)
+            if (!container.includeTags && currentComponents.version) {
                 const referenceGroups =
                     currentComponents.version.split('.').length;
 

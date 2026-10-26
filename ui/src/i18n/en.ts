@@ -126,6 +126,9 @@ export default {
     // Upstream 9.1.0 manual-update dialog. Values kept verbatim so the specs
     // that assert on the English UI (see tests/setup.ts) keep passing.
     updateTitle: "Update container",
+    updateNow: "Update now",
+    overrideCooldownAndUpdate: "Override cooldown and update",
+    overrideCooldownAmpUpdate: "Override cooldown & update",
     currentVersion: "Current version",
     availableVersion: "Available version",
     loadingTriggers: "Loading triggers...",
@@ -216,6 +219,7 @@ export default {
   triggers: {
     none: "No triggers associated to the container",
     run: "Run",
+    overrideCooldownHint: "Override cool-down and run trigger immediately",
     success: "Trigger executed with success",
     error: "Trigger executed with error ({msg})",
     threshold: "(threshold {threshold})",
@@ -225,6 +229,7 @@ export default {
     indefinitely: " indefinitely",
     coolingDownTitle: "Update in cool-down",
     coolingDownText: "A new version is available but currently held in cool-down period{until}.",
+    overrideCooldownHint: "This container is currently in cool-down. Updating now will override the cooldown period and install the update immediately.",
     snoozedTitle: "Update snoozed",
     snoozedText: "Version {version} is snoozed{until}.",
     tag: "Tag",

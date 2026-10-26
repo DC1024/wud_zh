@@ -123,6 +123,9 @@ export default {
     openWatchlist: "打开监控清单",
     // 上游 9.1.0 手动更新弹窗
     updateTitle: "更新容器",
+    updateNow: "立即更新",
+    overrideCooldownAndUpdate: "覆盖冷却并更新",
+    overrideCooldownAmpUpdate: "覆盖冷却并更新",
     currentVersion: "当前版本",
     availableVersion: "可用版本",
     loadingTriggers: "正在加载触发器……",
@@ -211,6 +214,7 @@ export default {
   triggers: {
     none: "该容器未关联任何触发器",
     run: "运行",
+    overrideCooldownHint: "覆盖冷却期并立即执行触发器",
     success: "触发器执行成功",
     error: "触发器执行出错（{msg}）",
     threshold: "（阈值 {threshold}）",
@@ -220,6 +224,7 @@ export default {
     indefinitely: "（无限期）",
     coolingDownTitle: "更新冷却中",
     coolingDownText: "有新版本可用，但当前处于冷却期{until}。",
+    overrideCooldownHint: "此容器当前处于冷却期。立即更新将覆盖冷却期并马上安装更新。",
     snoozedTitle: "更新已暂缓",
     snoozedText: "版本 {version} 已暂缓{until}。",
     tag: "标签",

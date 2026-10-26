@@ -29,5 +29,11 @@ description: Unreleased changes and upcoming features in WUD (What's Up Docker?)
 - 🐛 [WATCHER] Honour the stored watch preference during targeted reconciliation so a restarted container is not pruned from the store
 - 🐛 [WATCHER] Normalize aarch64 to arm64 in Swarm watcher (fixes #1401)
 - 📚 [TRIGGER] Document self-update configuration options for Docker Compose trigger (fixes #1414)
+- 🚀 [AUTH] Support a configured session secret via `WUD_AUTH_SESSION_SECRET`, while preserving the version and MAC-bound fallback when unset.
+- 🚀 [CONTAINER] Add option to override update cooldown and trigger update immediately (fixes #1463)
+- 🐛 [E2E] Update expected Home Assistant image version to 2026.10.4 in E2E scenarios
+- 🐛 [TRIGGER] Do not copy Docker-generated MAC address when recreating container (#1464)
+- 🐛 [WATCHER] Allow tag candidates with different version segment count when wud.tag.include is defined (fixes #1465)
+- 🐛 [WATCHER] Index containers created while WUD was stopped during startup reconciliation (fixes #1466)
 
 ---

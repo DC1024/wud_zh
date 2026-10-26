@@ -8,9 +8,23 @@
       icon="mdi-timer-sand"
       class="mb-3"
     >
-      <div class="font-weight-medium">{{ $t('update.coolingDownTitle') }}</div>
-      <div class="text-caption">
-        {{ $t('update.coolingDownText', { until: coolingDownUntilText }) }}
+      <div class="d-flex align-center justify-space-between flex-wrap" style="gap: 8px">
+        <div>
+          <div class="font-weight-medium">{{ $t('update.coolingDownTitle') }}</div>
+          <div class="text-caption">
+            {{ $t('update.coolingDownText', { until: coolingDownUntilText }) }}
+          </div>
+        </div>
+        <v-btn
+          v-if="canWrite"
+          color="primary"
+          variant="flat"
+          size="small"
+          prepend-icon="mdi-lightning-bolt"
+          @click="$emit('override-cooldown')"
+        >
+          {{ $t('containers.updateNow') }}
+        </v-btn>
       </div>
     </v-alert>
 
@@ -132,7 +146,12 @@ import { defineComponent } from "vue";
 import { copyToClipboard } from "@/services/clipboard";
 
 export default defineComponent({
+  emits: ["override-cooldown"],
   props: {
+    canWrite: {
+      type: Boolean,
+      default: true,
+    },
     semver: {
       type: Boolean,
     },
