@@ -1,6 +1,7 @@
 import { AxiosRequestConfig } from 'axios';
 import DockerRegistryV2 from '../../DockerRegistryV2';
 import { ContainerImage } from '../../../model/container';
+import { AnySchema } from 'joi';
 
 /**
  * Alibaba Cloud Container Registry (ACR / Aliyun) integration.
@@ -31,7 +32,7 @@ import { ContainerImage } from '../../../model/container';
 class Alibaba extends DockerRegistryV2 {
     protected registryPattern = /^(?:[\w-]+\.)*aliyuncs\.com$/;
 
-    getConfigurationSchema() {
+    getConfigurationSchema(): AnySchema {
         return this.joi.alternatives([
             this.joi.string().allow(''),
             this.joi.object().keys({
@@ -74,7 +75,18 @@ class Alibaba extends DockerRegistryV2 {
         image: ContainerImage,
         requestOptions: AxiosRequestConfig,
     ): Promise<AxiosRequestConfig> {
+        // A pre-issued Bearer token can be supplied directly via the `token`
+        // configuration field (upstream 9.7.0, fixes #1519). When no Basic
+        // credentials are configured, use it verbatim instead of performing
+        // the challenge/token exchange.
         const credentials = this.getAuthCredentials();
+        if (this.configuration?.token && !credentials) {
+            return this.authenticateBearer(
+                requestOptions,
+                this.configuration.token,
+            );
+        }
+
         const registryUrl = this.getRegistryApiBase(image);
 
         if (!registryUrl) {

@@ -25,6 +25,32 @@ test('validateConfiguration should accept username and password config', () => {
     }).not.toThrow();
 });
 
+// Upstream 9.7.0 (fixes #1519): token / auth based configurations are valid.
+test('validateConfiguration should accept username and token config', () => {
+    expect(() => {
+        alibaba.validateConfiguration({
+            username: 'aliyun-user',
+            token: 'aliyun-token',
+        });
+    }).not.toThrow();
+});
+
+test('validateConfiguration should accept auth config', () => {
+    expect(() => {
+        alibaba.validateConfiguration({
+            auth: 'YWxpeXVuLXVzZXI6YWxpeXVuLXBhc3N3b3Jk',
+        });
+    }).not.toThrow();
+});
+
+test('validateConfiguration should accept token-only config', () => {
+    expect(() => {
+        alibaba.validateConfiguration({
+            token: 'direct-bearer-token',
+        });
+    }).not.toThrow();
+});
+
 testRegistryProvider(Alibaba, validConfig, {
     matchingUrls: [
         'registry.cn-hangzhou.aliyuncs.com',
@@ -165,5 +191,20 @@ describe('Alibaba Bearer authentication', () => {
         const result = await provider.authenticate(image, { headers: {} });
 
         expect(result.headers.Authorization).toBe('Basic YmFzZTY0LWNyZWRz');
+    });
+
+    // Upstream 9.7.0 (fixes #1519): a pre-issued Bearer token supplied via
+    // `configuration.token` is used verbatim, without any challenge exchange.
+    test('should use a configured static Bearer token without credentials', async () => {
+        const { default: axios } = await import('axios');
+        provider.configuration = { token: 'pre-issued-bearer-token' };
+        provider.getAuthCredentials = jest.fn().mockReturnValue(undefined);
+
+        const result = await provider.authenticate(image, { headers: {} });
+
+        expect(axios).not.toHaveBeenCalled();
+        expect(result.headers.Authorization).toBe(
+            'Bearer pre-issued-bearer-token',
+        );
     });
 });
