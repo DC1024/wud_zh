@@ -14,9 +14,13 @@ function freshDb() {
 /** The database as an older fork build left it: fork migration on id 5. */
 function legacyForkDb() {
     const db = freshDb();
-    // Bring the schema up with the *new* code first, then rewrite the journal
-    // row to look like the pre-renumbering layout.
+    // Bring the schema up with the *new* code first, then roll back to the
+    // pre-9.8.0 layout: upstream's id-5 migration (version columns) did not
+    // exist yet, so remove it before putting the fork migration back on id 5.
     runMigrations(db);
+    db.exec('ALTER TABLE container_images DROP COLUMN version');
+    db.exec('ALTER TABLE container_results_history DROP COLUMN version');
+    db.prepare('DELETE FROM __wud_migrations WHERE id = 5').run();
     db.prepare(
         "UPDATE __wud_migrations SET id = 5, name = '0005_watched_containers' WHERE id = 9005",
     ).run();
@@ -54,10 +58,14 @@ describe('runMigrations', () => {
     test('records fork migrations outside upstream id range', () => {
         const db = freshDb();
         runMigrations(db);
-        const ids = migrationRows(db).map((r) => r.id);
-        // Upstream owns 0..n; the fork must not squat on the next free id.
-        expect(ids).toContain(9005);
-        expect(ids).not.toContain(5);
+        const rows = migrationRows(db);
+        // Upstream now legitimately owns id 5; the fork must live outside it.
+        expect(rows.find((r) => r.id === 9005)?.name).toBe(
+            '9005_watched_containers',
+        );
+        expect(rows.find((r) => r.id === 5)?.name).toBe(
+            '0005_image_and_result_version',
+        );
         db.close();
     });
 
@@ -77,7 +85,10 @@ describe('runMigrations', () => {
         runMigrations(db);
 
         const rows = migrationRows(db);
-        expect(rows.map((r) => r.id)).not.toContain(5);
+        // After the fork row vacates id 5, upstream's own migration claims it.
+        expect(rows.find((r) => r.id === 5)?.name).toBe(
+            '0005_image_and_result_version',
+        );
         const moved = rows.find((r) => r.id === 9005);
         expect(moved?.name).toBe('9005_watched_containers');
         // The data must survive the renumbering untouched.
@@ -88,23 +99,23 @@ describe('runMigrations', () => {
         db.close();
     });
 
-    test('leaves an upstream row on id 5 alone and still applies fork migration', () => {
+    test('keeps upstream id 5 untouched and still applies the fork migration', () => {
         const db = freshDb();
         runMigrations(db);
-        // Simulate upstream shipping its own migration 5.
-        db.prepare(
-            "UPDATE __wud_migrations SET id = 5, name = '0005_upstream_thing' WHERE id = 9005",
-        ).run();
-        // ...and drop the fork table so we can observe it being (re)created.
+        // Upstream already owns id 5 out of the box now.
         db.exec('DROP TABLE watched_containers');
 
         runMigrations(db);
 
         const rows = migrationRows(db);
         // Upstream's row is untouched: we must never hijack it.
-        expect(rows.find((r) => r.id === 5)?.name).toBe('0005_upstream_thing');
+        expect(rows.find((r) => r.id === 5)?.name).toBe(
+            '0005_image_and_result_version',
+        );
         // And the fork migration is applied, not skipped.
-        expect(rows.find((r) => r.id === 9005)).toBeDefined();
+        expect(rows.find((r) => r.id === 9005)?.name).toBe(
+            '9005_watched_containers',
+        );
         expect(tableNames(db)).toContain('watched_containers');
         db.close();
     });

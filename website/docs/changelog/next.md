@@ -42,5 +42,7 @@ description: Unreleased changes and upcoming features in WUD (What's Up Docker?)
 - 🐛 [TRIGGER] Fail fast when the XMPP server is unreachable instead of hanging forever (new `WUD_TRIGGER_XMPP_{trigger_name}_TIMEOUT` option)
 - 🐛 [REGISTRY] Mask proxy credentials in registry configurations
 - 🐛 [TRIGGER] Mask proxy credentials in HTTP trigger configurations
+- 🐛 [WATCHER] Fix cool-down delay ignored for tag updates when digest watching is disabled (#1543)
+- 🐛 [WATCHER] Populate candidate digest on SemVer updates when digest watching is disabled (fixes #1542)
 
 ---

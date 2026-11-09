@@ -56,6 +56,7 @@ import {
 import { isOneshot } from '../../../runtime/mode';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
+import { resolveCandidateConfig, resolveDigestConfig } from '../../imageConfig';
 import { ComponentConfiguration } from '../../../registry/Component';
 
 // ─── Types & constants ────────────────────────────────────────────────────────
@@ -914,6 +915,18 @@ export class Kubernetes extends Watcher {
                 },
                 architecture,
                 os: 'linux',
+                version:
+                    typeof annotations?.['org.opencontainers.image.version'] ===
+                        'string' &&
+                    annotations['org.opencontainers.image.version'].trim() !==
+                        ''
+                        ? annotations['org.opencontainers.image.version'].trim()
+                        : typeof annotations?.['app.kubernetes.io/version'] ===
+                                'string' &&
+                            annotations['app.kubernetes.io/version'].trim() !==
+                                ''
+                          ? annotations['app.kubernetes.io/version'].trim()
+                          : undefined,
             },
             labels: annotations,
             snoozedVersion: containerInStore?.snoozedVersion,
@@ -991,6 +1004,25 @@ export class Kubernetes extends Watcher {
                 logContainer,
             );
 
+        if (candidateTag) {
+            result.tag = candidateTag;
+            if (candidateRemoteDigest?.digest) {
+                result.digest = candidateRemoteDigest.digest;
+                result.created = candidateRemoteDigest.created;
+                if (candidateRemoteDigest.indexDigest) {
+                    result.indexDigest = candidateRemoteDigest.indexDigest;
+                }
+            }
+            await resolveCandidateConfig({
+                registryProvider,
+                container,
+                candidateTag,
+                candidateRemoteDigest,
+                result,
+                logContainer,
+            });
+        }
+
         if (watchDigest && container.image.digest.repo) {
             const imageToGetDigestFrom = JSON.parse(
                 JSON.stringify(container.image),
@@ -1048,11 +1080,17 @@ export class Kubernetes extends Watcher {
             } else {
                 container.image.digest.value = container.image.digest.repo;
             }
+
+            await resolveDigestConfig({
+                registryProvider,
+                container,
+                imageToGetDigestFrom,
+                remoteDigest,
+                result,
+                logContainer,
+            });
         }
 
-        if (candidateTag) {
-            result.tag = candidateTag;
-        }
         return result;
     }
 

@@ -47,6 +47,12 @@ function watchRows(db: Database.Database) {
 function legacyDb() {
     const db = freshDb();
     runMigrations(db);
+    // Roll back to a pre-9.8.0 layout: upstream's id-5 migration (version
+    // columns) did not exist yet, so drop it from the journal and schema, then
+    // put the fork migration back on id 5 (its historical colliding location).
+    db.exec('ALTER TABLE container_images DROP COLUMN version');
+    db.exec('ALTER TABLE container_results_history DROP COLUMN version');
+    db.prepare('DELETE FROM __wud_migrations WHERE id = ?').run(LEGACY_ID);
     db.prepare('UPDATE __wud_migrations SET id = ?, name = ? WHERE id = ?').run(
         LEGACY_ID,
         '0005_watched_containers',
@@ -65,7 +71,7 @@ describe('fork migration id isolation', () => {
         const upstreamRange = migrations.filter(
             (m) => m.id >= 0 && m.id < 1000,
         );
-        expect(upstreamRange.map((m) => m.id)).toEqual([0, 1, 2, 3, 4]);
+        expect(upstreamRange.map((m) => m.id)).toEqual([0, 1, 2, 3, 4, 5]);
     });
 
     test('every fork-owned migration id is at or above the fork base', () => {
@@ -86,7 +92,11 @@ describe('upgrade from a legacy fork database', () => {
         runMigrations(db);
 
         const rows = journal(db);
-        expect(rows.map((r) => r.id)).not.toContain(LEGACY_ID);
+        // The freed id 5 is immediately claimed by upstream's own migration;
+        // the fork row itself must now live under 9005.
+        expect(rows.find((r) => r.id === LEGACY_ID)?.name).toBe(
+            '0005_image_and_result_version',
+        );
         expect(rows.find((r) => r.id === FORK_ID)?.name).toBe(
             '9005_watched_containers',
         );
@@ -127,40 +137,44 @@ describe('upgrade from a legacy fork database', () => {
     test('leaves an upstream row on id 5 alone when one already exists', () => {
         const db = freshDb();
         runMigrations(db);
-        // Legit fork state, but a row already owns id 5: that row is upstream's.
-        db.prepare('UPDATE __wud_migrations SET id = ? WHERE id = ?').run(
-            LEGACY_ID,
-            FORK_ID,
-        );
+        // Upstream owns id 5 out of the box now; add an unrelated higher row too.
         db.prepare(
             "INSERT INTO __wud_migrations (id, name) VALUES (6, '0006_upstream_other')",
         ).run();
 
         runMigrations(db);
 
+        const rows = journal(db);
+        // Upstream's id-5 row is never hijacked by the fork renumbering.
+        expect(rows.find((r) => r.id === LEGACY_ID)?.name).toBe(
+            '0005_image_and_result_version',
+        );
         // Unrelated rows are never touched.
-        expect(journal(db).find((r) => r.id === 6)?.name).toBe(
+        expect(rows.find((r) => r.id === 6)?.name).toBe(
             '0006_upstream_other',
         );
-        // And our fork migration is recorded under its own id again, because the
-        // bare id 5 no longer identifies it.
+        // Our fork migration lives under its own id.
+        expect(rows.find((r) => r.id === FORK_ID)?.name).toBe(
+            '9005_watched_containers',
+        );
         expect(tables(db)).toContain('watched_containers');
         db.close();
     });
 
-    test('applies the fork migration when upstream later claims id 5', () => {
+    test('applies the fork migration when upstream claims id 5', () => {
         const db = freshDb();
         runMigrations(db);
-        // Simulate upstream shipping migration 5 after us.
-        db.prepare(
-            "UPDATE __wud_migrations SET id = 5, name = '0005_upstream_thing' WHERE id = ?",
-        ).run(FORK_ID);
+        // Upstream already ships its own migration 5; drop the fork table so we
+        // can observe the fork migration (re)creating it instead of being
+        // skipped because the bare id 5 now means upstream's row.
         db.exec('DROP TABLE watched_containers');
 
         runMigrations(db);
 
         const rows = journal(db);
-        expect(rows.find((r) => r.id === 5)?.name).toBe('0005_upstream_thing');
+        expect(rows.find((r) => r.id === 5)?.name).toBe(
+            '0005_image_and_result_version',
+        );
         expect(rows.find((r) => r.id === FORK_ID)).toBeDefined();
         expect(tables(db)).toContain('watched_containers');
         db.close();

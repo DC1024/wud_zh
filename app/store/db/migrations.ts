@@ -183,6 +183,14 @@ export const migrations: Migration[] = [
         sql: [`ALTER TABLE containers ADD COLUMN delay TEXT;`],
     },
     {
+        id: 5,
+        name: '0005_image_and_result_version',
+        sql: [
+            `ALTER TABLE container_images ADD COLUMN version TEXT;`,
+            `ALTER TABLE container_results_history ADD COLUMN version TEXT;`,
+        ],
+    },
+    {
         // Fork-owned migration. Parked at 9005 (not 5) so it can never occupy an
         // id upstream is about to use; see FORK_MIGRATION_ID_BASE above.
         id: 9005,

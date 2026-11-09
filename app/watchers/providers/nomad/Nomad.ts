@@ -67,6 +67,7 @@ import {
 } from '../../../registries/Registry';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher from '../../Watcher';
+import { resolveCandidateConfig, resolveDigestConfig } from '../../imageConfig';
 import Component, { ComponentConfiguration } from '../../../registry/Component';
 
 // ─── Types & constants ────────────────────────────────────────────────────────
@@ -808,6 +809,12 @@ export class Nomad extends Watcher {
                 },
                 architecture,
                 os: 'linux',
+                version:
+                    typeof mergedMeta?.['org.opencontainers.image.version'] ===
+                        'string' &&
+                    mergedMeta['org.opencontainers.image.version'].trim() !== ''
+                        ? mergedMeta['org.opencontainers.image.version'].trim()
+                        : undefined,
             },
             labels: mergedMeta,
             snoozedVersion: containerInStore?.snoozedVersion,
@@ -876,6 +883,25 @@ export class Nomad extends Watcher {
                 logContainer,
             );
 
+        if (candidateTag) {
+            result.tag = candidateTag;
+            if (candidateRemoteDigest?.digest) {
+                result.digest = candidateRemoteDigest.digest;
+                result.created = candidateRemoteDigest.created;
+                if (candidateRemoteDigest.indexDigest) {
+                    result.indexDigest = candidateRemoteDigest.indexDigest;
+                }
+            }
+            await resolveCandidateConfig({
+                registryProvider,
+                container,
+                candidateTag,
+                candidateRemoteDigest,
+                result,
+                logContainer,
+            });
+        }
+
         if (watchDigest && container.image.digest.repo) {
             const imageToGetDigestFrom = JSON.parse(
                 JSON.stringify(container.image),
@@ -933,11 +959,17 @@ export class Nomad extends Watcher {
             } else {
                 container.image.digest.value = container.image.digest.repo;
             }
+
+            await resolveDigestConfig({
+                registryProvider,
+                container,
+                imageToGetDigestFrom,
+                remoteDigest,
+                result,
+                logContainer,
+            });
         }
 
-        if (candidateTag) {
-            result.tag = candidateTag;
-        }
         return result;
     }
 

@@ -50,12 +50,13 @@ import {
     resolveRegistry,
     isRegistryRegistered,
 } from '../../../registries/registryProvider';
-import {
+import Registry, {
     resolveCandidateTag,
     isNonContainerArtifactError,
 } from '../../../registries/Registry';
 import { getWatchContainerGauge } from '../../../prometheus/watcher';
 import Watcher, { ReconcileOptions, ContainerReport } from '../../Watcher';
+import { resolveCandidateConfig, resolveDigestConfig } from '../../imageConfig';
 import { ComponentConfiguration } from '../../../registry/Component';
 import { Logger } from 'pino';
 
@@ -88,6 +89,7 @@ export interface DockerWatcherConfiguration extends ComponentConfiguration {
     watchall: boolean;
     watchdigest?: any;
     watchdigestdefault?: boolean;
+    containerdigests?: Record<string, { watchdigest?: boolean }>;
     watchevents: boolean;
     watchatstart: boolean;
     delay?: string;
@@ -498,10 +500,23 @@ export function getRepoDigest(containerImage: any): string | undefined {
 export const ROLLBACK_ARCHIVE_REGEX = /-wud-old-\d+$/;
 
 /**
+ * Docker / Portainer recreate temporary rename regex pattern:
+ * e.g., "a1b2c3d4e5f6_my-container" (12 hex chars followed by underscore)
+ */
+export const DOCKER_RECREATE_TEMP_REGEX = /^[0-9a-f]{12}_/;
+
+/**
  * Return true if container is a rollback archive container.
  */
 export function isRollbackArchive(name?: string): boolean {
     return Boolean(name && ROLLBACK_ARCHIVE_REGEX.test(name));
+}
+
+/**
+ * Return true if container name matches Docker's recreate temporary name pattern.
+ */
+export function isDockerRecreateTempName(name?: string): boolean {
+    return Boolean(name && DOCKER_RECREATE_TEMP_REGEX.test(name));
 }
 
 /**
@@ -547,8 +562,7 @@ function matchFilter(
  * Return true if container must be watched.
  *
  * Priority order:
- * Priority order:
- *   0. a container whose name matches the rollback archive pattern (/-wud-old-\d+$/) is NEVER watched
+ *   0. a container whose name matches the rollback archive pattern (/-wud-old-\d+$/) or the Docker recreate temporary name pattern (/^[0-9a-f]{12}_/) is NEVER watched
  *   1. an explicit `wud.watch` label always wins (infrastructure as code)
  *   2. otherwise the preference recorded from the UI, when one is set
  *   3. otherwise, if an exclude filter is configured and the container matches it, NOT watched
@@ -575,7 +589,11 @@ export function isContainerToWatch(
     log?: Pick<Logger, 'warn'>,
     preference?: boolean,
 ) {
-    if (containerName && ROLLBACK_ARCHIVE_REGEX.test(containerName)) {
+    if (
+        containerName &&
+        (ROLLBACK_ARCHIVE_REGEX.test(containerName) ||
+            isDockerRecreateTempName(containerName))
+    ) {
         return false;
     }
     if (wudWatchLabelValue !== undefined && wudWatchLabelValue !== '') {
@@ -632,6 +650,13 @@ export class Docker extends Watcher {
     private isWatching = false;
 
     getConfigurationSchema() {
+        const containerDigestsSchema = this.joi
+            .object()
+            .pattern(
+                /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
+                this.joi.object({ watchdigest: this.joi.boolean().strict() }),
+            )
+            .strict();
         return joi.object().keys({
             socket: this.joi.string().default('/var/run/docker.sock'),
             host: this.joi.string(),
@@ -645,6 +670,26 @@ export class Docker extends Watcher {
             watchall: this.joi.boolean().default(false),
             watchdigest: this.joi.any(),
             watchdigestdefault: this.joi.boolean().optional(),
+            containerdigests: this.joi.alternatives().try(
+                containerDigestsSchema,
+                this.joi.string().custom((value, helpers) => {
+                    try {
+                        const parsed = JSON.parse(value);
+                        const validated = containerDigestsSchema.validate(
+                            parsed,
+                            {
+                                convert: false,
+                            },
+                        );
+                        if (validated.error) {
+                            return helpers.error('any.invalid');
+                        }
+                        return validated.value;
+                    } catch {
+                        return helpers.error('any.invalid');
+                    }
+                }),
+            ),
             watchevents: this.joi.boolean().default(true),
             watchatstart: this.joi.boolean().default(true),
             delay: this.joi.string().optional(),
@@ -1127,6 +1172,7 @@ export class Docker extends Watcher {
         if (
             containerName &&
             (ROLLBACK_ARCHIVE_REGEX.test(containerName) ||
+                isDockerRecreateTempName(containerName) ||
                 containerName === 'wud-self-update')
         ) {
             await this.pruneContainerFromStore(containerId);
@@ -1235,10 +1281,11 @@ export class Docker extends Watcher {
             ? dockerEvent.Actor.Attributes.name.replace(/\//, '')
             : undefined;
 
-        // Rollback archive containers and self-update helper should never be processed or indexed
+        // Rollback archive containers, recreate temporary containers, and self-update helper should never be processed or indexed
         if (
             eventName &&
             (ROLLBACK_ARCHIVE_REGEX.test(eventName) ||
+                isDockerRecreateTempName(eventName) ||
                 eventName === 'wud-self-update')
         ) {
             return;
@@ -1281,7 +1328,11 @@ export class Docker extends Watcher {
                               )
                             : undefined);
 
-                    if (newName && ROLLBACK_ARCHIVE_REGEX.test(newName)) {
+                    if (
+                        newName &&
+                        (ROLLBACK_ARCHIVE_REGEX.test(newName) ||
+                            isDockerRecreateTempName(newName))
+                    ) {
                         return;
                     }
                     const containerFound =
@@ -1599,6 +1650,36 @@ export class Docker extends Watcher {
         }
     }
 
+    private resolveWatchDigest(
+        containerName: string,
+        labels: Record<string, string>,
+        isSemver: boolean,
+        registryProvider?: Registry,
+        imageName?: string,
+    ): boolean {
+        const label = labels[wudWatchDigest];
+        if (label !== undefined && label !== '') {
+            return label.toLowerCase() === 'true';
+        }
+        const central =
+            this.configuration.containerdigests?.[containerName]?.watchdigest;
+        if (central !== undefined) {
+            return central;
+        }
+        if (isSemver) {
+            return false;
+        }
+        return (
+            (registryProvider
+                ? registryProvider.shouldWatchDigest(
+                      undefined,
+                      imageName,
+                      this.configuration.watchdigestdefault,
+                  )
+                : this.configuration.watchdigestdefault) ?? false
+        );
+    }
+
     /**
      * List every container the Docker daemon reports, watched or not.
      *
@@ -1654,17 +1735,13 @@ export class Docker extends Watcher {
             );
             return result;
         } else {
-            const watchDigestLabel = container.labels?.[wudWatchDigest];
-            let watchDigest = false;
-            if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
-                watchDigest = watchDigestLabel.toLowerCase() === 'true';
-            } else if (!container.image.tag.semver) {
-                watchDigest = registryProvider.shouldWatchDigest(
-                    undefined,
-                    container.image.name,
-                    this.configuration.watchdigestdefault,
-                );
-            }
+            const watchDigest = this.resolveWatchDigest(
+                container.name,
+                container.labels || {},
+                container.image.tag.semver,
+                registryProvider,
+                container.image.name,
+            );
             if (container.image.digest) {
                 container.image.digest.watch = watchDigest;
             } else {
@@ -1737,6 +1814,25 @@ export class Docker extends Watcher {
                         );
                     }
                 }
+            }
+
+            if (candidateTag) {
+                result.tag = candidateTag;
+                if (candidateRemoteDigest?.digest) {
+                    result.digest = candidateRemoteDigest.digest;
+                    result.created = candidateRemoteDigest.created;
+                    if (candidateRemoteDigest.indexDigest) {
+                        result.indexDigest = candidateRemoteDigest.indexDigest;
+                    }
+                }
+                await resolveCandidateConfig({
+                    registryProvider,
+                    container,
+                    candidateTag,
+                    candidateRemoteDigest,
+                    result,
+                    logContainer,
+                });
             }
 
             // Must watch digest? => Find local/remote digests on registry
@@ -1864,50 +1960,14 @@ export class Docker extends Watcher {
                 // A digest-only update is unreadable on its own ("sha A -> sha B"),
                 // but the remote version label and build date both live in the
                 // image config blob.
-                if (
-                    remoteDigest?.version !== 1 &&
-                    result.digest !== undefined &&
-                    container.image.digest.value !== result.digest
-                ) {
-                    // A pending update stays pending until the user applies it,
-                    // so resolve each remote digest ONCE and reuse it afterwards.
-                    // Without this, every scan would re-request the config of an
-                    // update that is already known -- unwanted traffic against
-                    // registries that rate limit anonymous pulls (Docker Hub
-                    // allows 100 per 6h per IP, and manifest GETs count).
-                    const previousResult = storeContainer.getContainer(
-                        container.id,
-                    )?.result;
-                    if (previousResult?.digest === result.digest) {
-                        result.created = previousResult.created;
-                        result.version = previousResult.version;
-                    } else {
-                        try {
-                            const remoteConfig =
-                                await registryProvider.getImageConfig(
-                                    imageToGetDigestFrom,
-                                    result.digest,
-                                    remoteDigest.configDigest,
-                                );
-                            result.created =
-                                remoteConfig.created ?? result.created;
-                            result.version = remoteConfig.version;
-                        } catch (e: any) {
-                            if (
-                                logContainer &&
-                                typeof logContainer.debug === 'function'
-                            ) {
-                                logContainer.debug(
-                                    `Cannot get remote image config (${e.message})`,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (candidateTag) {
-                result.tag = candidateTag;
+                await resolveDigestConfig({
+                    registryProvider,
+                    container,
+                    imageToGetDigestFrom,
+                    remoteDigest,
+                    result,
+                    logContainer,
+                });
             }
         }
         return result;
@@ -2004,7 +2064,11 @@ export class Docker extends Watcher {
                 const currentContainerName = this.getContainerName(container);
                 const oldName = containerInStore.name;
                 const oldDisplayName = containerInStore.displayName;
-                if (currentContainerName && oldName !== currentContainerName) {
+                if (
+                    currentContainerName &&
+                    oldName !== currentContainerName &&
+                    !isDockerRecreateTempName(currentContainerName)
+                ) {
                     if (this.log && typeof this.log.info === 'function') {
                         this.log.info(
                             `Container ${containerInStore.id} renamed from ${oldName} to ${currentContainerName}`,
@@ -2028,7 +2092,10 @@ export class Docker extends Watcher {
                         containerInStore.displayName = explicitDisplayName;
                         isUpdated = true;
                     }
-                } else if (currentContainerName) {
+                } else if (
+                    currentContainerName &&
+                    !isDockerRecreateTempName(currentContainerName)
+                ) {
                     if (
                         oldName !== currentContainerName ||
                         oldDisplayName === oldName ||
@@ -2054,27 +2121,17 @@ export class Docker extends Watcher {
                     resolveContainerMetadata(containerInStore);
                 }
 
-                const watchDigestLabel = containerLabels[wudWatchDigest];
-                let watchDigest = false;
-                if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
-                    watchDigest = watchDigestLabel.toLowerCase() === 'true';
-                } else if (!containerInStore.image?.tag?.semver) {
-                    const registryProvider = findRegistryProvider(
-                        containerInStore.image?.registry?.url,
-                        getRegistries(),
-                    );
-                    if (registryProvider) {
-                        watchDigest = registryProvider.shouldWatchDigest(
-                            undefined,
-                            containerInStore.image?.name,
-                            this.configuration.watchdigestdefault,
-                        );
-                    } else if (
-                        this.configuration.watchdigestdefault !== undefined
-                    ) {
-                        watchDigest = this.configuration.watchdigestdefault;
-                    }
-                }
+                const registryProvider = findRegistryProvider(
+                    containerInStore.image?.registry?.url,
+                    getRegistries(),
+                );
+                const watchDigest = this.resolveWatchDigest(
+                    containerInStore.name,
+                    containerLabels,
+                    containerInStore.image?.tag?.semver,
+                    registryProvider,
+                    containerInStore.image?.name,
+                );
                 if (
                     containerInStore.image?.digest &&
                     containerInStore.image.digest.watch !== watchDigest
@@ -2112,6 +2169,13 @@ export class Docker extends Watcher {
         const variant = image.Variant;
         const created = image.Created;
         const imageId = image.Id;
+        const rawVersion =
+            image.Config?.Labels?.['org.opencontainers.image.version'] ||
+            image.ContainerConfig?.Labels?.['org.opencontainers.image.version'];
+        const version =
+            typeof rawVersion === 'string' && rawVersion.trim() !== ''
+                ? rawVersion.trim()
+                : undefined;
 
         // Parse image to get registry, organization...
         let imageNameToParse = container.Config?.Image || container.Image;
@@ -2215,22 +2279,13 @@ export class Docker extends Watcher {
             transformTag(effectiveTransformTags, tagName, containerName),
         );
         const isSemver = parsedTag !== null && parsedTag !== undefined;
-        const watchDigestLabel = containerLabels[wudWatchDigest];
-        let watchDigest = false;
-
-        if (watchDigestLabel !== undefined && watchDigestLabel !== '') {
-            watchDigest = watchDigestLabel.toLowerCase() === 'true';
-        } else if (!isSemver) {
-            if (registryProvider) {
-                watchDigest = registryProvider.shouldWatchDigest(
-                    undefined,
-                    parsedImage.path,
-                    this.configuration.watchdigestdefault,
-                );
-            } else {
-                watchDigest = this.configuration.watchdigestdefault;
-            }
-        }
+        const watchDigest = this.resolveWatchDigest(
+            containerName,
+            containerLabels,
+            isSemver,
+            registryProvider,
+            parsedImage.path,
+        );
 
         return this.normalizeContainer({
             id: containerId,
@@ -2269,6 +2324,7 @@ export class Docker extends Watcher {
                 os,
                 variant,
                 created,
+                version,
             },
             labels: containerLabels,
             snoozedVersion: containerInStore?.snoozedVersion,

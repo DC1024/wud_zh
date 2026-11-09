@@ -5,6 +5,7 @@ import Docker, {
     getTagCandidates,
     formatErrorMessage,
     getRepoDigest,
+    isDockerRecreateTempName,
 } from './Docker';
 import Registry, {
     UnsupportedArtifactError,
@@ -173,6 +174,432 @@ describe('Docker Watcher', () => {
         if (docker) {
             await docker.deregisterComponent();
         }
+    });
+
+    describe('Central digest watching', () => {
+        test.each([
+            { 'Service-A': { watchdigest: true }, db: { watchdigest: false } },
+            {},
+            { db: {} },
+        ])(
+            'accepts the same strict JSON and native digest map %j',
+            (options) => {
+                for (const value of [JSON.stringify(options), options]) {
+                    const config = docker.validateConfiguration({
+                        containerdigests: value,
+                    });
+                    expect(config.containerdigests).toEqual(options);
+                    expect(docker.validateConfiguration(config)).toEqual(
+                        config,
+                    );
+                }
+            },
+        );
+
+        test.each([
+            '{',
+            'null',
+            '[]',
+            'true',
+            '1',
+            '"text"',
+            '{"db":{"watchdigest":"true"}}',
+            '{"db":{"watchdigest":1}}',
+            '{"db":{"watchdigest":null}}',
+            '{"db":{"taginclude":".*"}}',
+            '{"db":false}',
+            '{"db":[]}',
+            '{"db":null}',
+            '{"/db":{"watchdigest":true}}',
+        ])('rejects malformed or unsupported digest JSON %s', (value) => {
+            expect(() =>
+                docker.validateConfiguration({
+                    containerdigests: value,
+                }),
+            ).toThrow();
+        });
+
+        test.each([
+            null,
+            [],
+            true,
+            1,
+            { db: { watchdigest: 'true' } },
+            { db: { watchdigest: 'false' } },
+            { db: { watchdigest: 1 } },
+            { db: { watchdigest: null } },
+            { db: { taginclude: '.*' } },
+            { db: false },
+            { db: [] },
+            { db: null },
+            { '/db': { watchdigest: true } },
+        ])(
+            'rejects invalid native digest maps without coercion %j',
+            (value) => {
+                expect(() =>
+                    docker.validateConfiguration({
+                        containerdigests: value,
+                    }),
+                ).toThrow();
+            },
+        );
+
+        test('rejects the superseded unreleased containeroptions key', () => {
+            expect(() =>
+                docker.validateConfiguration({
+                    containeroptions: '{"db":{"watchdigest":true}}',
+                }),
+            ).toThrow();
+        });
+
+        const cases = [
+            [true, undefined, true],
+            [false, undefined, false],
+            [true, 'false', false],
+            [false, 'true', true],
+            [false, 'TRUE', true],
+            [true, '', true],
+        ];
+
+        test.each(cases)(
+            'discovery applies central %s and label %s as %s',
+            async (central, label, expected) => {
+                await docker.register('watcher', 'docker', 'test', {
+                    containerdigests: JSON.stringify({
+                        db: { watchdigest: central },
+                    }),
+                });
+                const labels =
+                    label === undefined ? {} : { 'wud.watch.digest': label };
+                mockImage.inspect.mockResolvedValue({
+                    Id: 'image123',
+                    Architecture: 'amd64',
+                    Os: 'linux',
+                    Created: '2023-01-01',
+                    RepoDigests: ['nginx@sha256:local'],
+                });
+                const containerModule = await import(
+                    '../../../model/container'
+                );
+                containerModule.validate.mockImplementation((value) => value);
+                const result = await docker.addImageDetailsToContainer({
+                    Id: '123',
+                    Image: 'nginx:1.0.0',
+                    Names: ['/db'],
+                    State: 'running',
+                    Labels: labels,
+                });
+                expect(result.image.digest.watch).toBe(expected);
+                expect(result.labels).toEqual(labels);
+                expect(labels).toEqual(
+                    label === undefined ? {} : { 'wud.watch.digest': label },
+                );
+            },
+        );
+
+        test.each(cases)(
+            'version check applies central %s and label %s as %s',
+            async (central, label, expected) => {
+                docker.configuration.containerdigests = {
+                    db: { watchdigest: central },
+                };
+                const labels =
+                    label === undefined ? {} : { 'wud.watch.digest': label };
+                const provider = {
+                    getTags: jest.fn().mockResolvedValue([]),
+                    shouldWatchDigest: jest.fn(() => true),
+                };
+                registry.getState.mockReturnValue({
+                    registry: { hub: provider },
+                });
+                const container = {
+                    name: 'db',
+                    labels,
+                    image: {
+                        name: 'nginx',
+                        registry: { name: 'hub' },
+                        tag: { value: '1.0.0', semver: true },
+                        digest: { watch: false },
+                    },
+                };
+                await docker.findNewVersion(container, {
+                    warn: jest.fn(),
+                    error: jest.fn(),
+                });
+                expect(container.image.digest.watch).toBe(expected);
+                expect(provider.getTags).toHaveBeenCalledWith(container.image);
+                expect(container.labels).toBe(labels);
+            },
+        );
+
+        test.each([
+            [undefined, 'false', true, true],
+            [undefined, 'true', false, false],
+            [{}, 'false', true, true],
+            [{}, 'true', false, false],
+            [{ 'wud.watch.digest': 'true' }, 'false', false, true],
+        ])(
+            'cache resolves digest watching from payload labels %j like upstream',
+            async (incomingLabels, cachedLabel, central, expected) => {
+                await docker.register('watcher', 'docker', 'test', {});
+                docker.configuration.containerdigests = {
+                    db: { watchdigest: central },
+                };
+                const labels = {
+                    'wud.watch.digest': cachedLabel,
+                    actual: 'kept',
+                };
+                const cached = {
+                    id: '123',
+                    name: 'db',
+                    watcher: 'test',
+                    labels,
+                    image: {
+                        name: 'nginx',
+                        tag: { semver: true },
+                        digest: { watch: !expected },
+                    },
+                };
+                storeContainer.getContainer.mockReturnValue(cached);
+                const incoming = { Id: '123', Labels: incomingLabels };
+                const result =
+                    await docker.addImageDetailsToContainer(incoming);
+                expect(result.image.digest.watch).toBe(expected);
+                expect(result.labels).toEqual(
+                    incomingLabels === undefined ? labels : incomingLabels,
+                );
+                expect(mockDockerApi.getImage).not.toHaveBeenCalled();
+            },
+        );
+
+        test.each([
+            ['db', true, true],
+            ['DB', true, false],
+            ['db-2', true, false],
+            ['db', false, true],
+        ])(
+            'matches names exactly and retains legacy defaults for %s',
+            async (name, semver, expected) => {
+                docker.configuration.containerdigests = {
+                    db: { watchdigest: true },
+                };
+                const provider = {
+                    getTags: jest.fn().mockResolvedValue([]),
+                    shouldWatchDigest: jest.fn(() => true),
+                };
+                registry.getState.mockReturnValue({
+                    registry: { hub: provider },
+                });
+                const container = {
+                    name,
+                    labels: {},
+                    image: {
+                        name: 'nginx',
+                        registry: { name: 'hub' },
+                        tag: { value: semver ? '1.0.0' : 'latest', semver },
+                        digest: { watch: false },
+                    },
+                };
+                await docker.findNewVersion(container, {
+                    warn: jest.fn(),
+                    error: jest.fn(),
+                });
+                expect(container.image.digest.watch).toBe(expected);
+            },
+        );
+
+        test.each([true, false])(
+            'central %s overrides non-semver registry defaults during discovery',
+            async (central) => {
+                await docker.register('watcher', 'docker', 'test', {
+                    containerdigests: JSON.stringify({
+                        db: { watchdigest: central },
+                    }),
+                });
+                const provider = {
+                    match: () => true,
+                    getId: () => 'hub',
+                    normalizeImage: (image) => image,
+                    shouldWatchDigest: jest.fn(() => !central),
+                };
+                registry.getState.mockReturnValue({
+                    registry: { hub: provider },
+                });
+                mockTag.parse.mockReturnValue(null);
+                mockImage.inspect.mockResolvedValue({
+                    Id: 'image123',
+                    Architecture: 'amd64',
+                    Os: 'linux',
+                    RepoDigests: [],
+                });
+                const containerModule = await import(
+                    '../../../model/container'
+                );
+                containerModule.validate.mockImplementation((value) => value);
+                const result = await docker.addImageDetailsToContainer({
+                    Id: '123',
+                    Image: 'nginx:latest',
+                    Name: '/db',
+                    Labels: {},
+                });
+                expect(result.image.digest.watch).toBe(central);
+                expect(provider.shouldWatchDigest).not.toHaveBeenCalled();
+            },
+        );
+
+        test.each([
+            [{ Config: { Labels: {} } }, true],
+            [{ labels: {} }, true],
+            [{}, true],
+            [{ Name: undefined }, false],
+        ])(
+            'forced refresh uses payload labels and name without cached fallback %j',
+            async (payload, expected) => {
+                await docker.register('watcher', 'docker', 'test', {
+                    containerdigests: '{"db":{"watchdigest":true}}',
+                });
+                const labels = { 'wud.watch.digest': 'false' };
+                storeContainer.getContainer.mockReturnValue({
+                    id: '123',
+                    name: 'db',
+                    labels,
+                });
+                mockImage.inspect.mockResolvedValue({
+                    Id: 'image123',
+                    Architecture: 'amd64',
+                    Os: 'linux',
+                    RepoDigests: [],
+                });
+                const containerModule = await import(
+                    '../../../model/container'
+                );
+                containerModule.validate.mockImplementation((value) => value);
+                const result = await docker.addImageDetailsToContainer(
+                    {
+                        Id: '123',
+                        Image: 'nginx:1.0.0',
+                        Name: '/db',
+                        ...payload,
+                    },
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    { forceRefresh: true },
+                );
+                expect(result.image.digest.watch).toBe(expected);
+                expect(result.labels).toEqual({});
+            },
+        );
+
+        test('empty matched options preserve a non-semver registry default', async () => {
+            docker.configuration.containerdigests = { db: {} };
+            const provider = { shouldWatchDigest: jest.fn(() => true) };
+            registry.getState.mockReturnValue({ registry: { hub: provider } });
+            const container = {
+                name: 'db',
+                labels: {},
+                image: {
+                    name: 'nginx',
+                    registry: { name: 'hub' },
+                    tag: { value: 'latest', semver: false },
+                    digest: { watch: false },
+                },
+            };
+            await docker.findNewVersion(container, {
+                warn: jest.fn(),
+                error: jest.fn(),
+            });
+            expect(container.image.digest.watch).toBe(true);
+            expect(provider.shouldWatchDigest).toHaveBeenCalledWith(
+                undefined,
+                'nginx',
+                undefined,
+            );
+        });
+
+        test.each([
+            [false, undefined, false],
+            [false, true, true],
+            [false, false, false],
+            [true, true, false],
+        ])(
+            'discovery always returns a boolean for semver %s with default %s',
+            async (semver, defaultValue, expected) => {
+                await docker.register('watcher', 'docker', 'test', {
+                    watchdigestdefault: defaultValue,
+                });
+                mockTag.parse.mockReturnValue(
+                    semver ? { major: 1, minor: 0, patch: 0 } : null,
+                );
+                mockImage.inspect.mockResolvedValue({
+                    Id: 'image123',
+                    Architecture: 'amd64',
+                    Os: 'linux',
+                    RepoDigests: [],
+                });
+                const containerModule = await import(
+                    '../../../model/container'
+                );
+                containerModule.validate.mockImplementation((value) => value);
+                const result = await docker.addImageDetailsToContainer({
+                    Id: '123',
+                    Image: semver ? 'nginx:1.0.0' : 'nginx:latest',
+                    Name: '/db',
+                    Labels: {},
+                });
+                expect(result.image.digest.watch).toBe(expected);
+                expect(typeof result.image.digest.watch).toBe('boolean');
+            },
+        );
+
+        test('an unspecified registry digest default resolves to false', async () => {
+            const provider = { shouldWatchDigest: jest.fn(() => undefined) };
+            registry.getState.mockReturnValue({ registry: { hub: provider } });
+            const container = {
+                name: 'db',
+                labels: {},
+                image: {
+                    name: 'nginx',
+                    registry: { name: 'hub' },
+                    tag: { value: 'latest', semver: false },
+                    digest: { watch: true },
+                },
+            };
+            await docker.findNewVersion(container, {
+                warn: jest.fn(),
+                error: jest.fn(),
+            });
+            expect(container.image.digest.watch).toBe(false);
+            expect(typeof container.image.digest.watch).toBe('boolean');
+        });
+
+        test('watcher-local map does not affect another watcher', async () => {
+            const second = new Docker();
+            docker.configuration.containerdigests = {
+                db: { watchdigest: true },
+            };
+            const provider = { getTags: jest.fn().mockResolvedValue([]) };
+            registry.getState.mockReturnValue({ registry: { hub: provider } });
+            const container = {
+                name: 'db',
+                labels: {},
+                image: {
+                    registry: { name: 'hub' },
+                    tag: { value: '1.0.0', semver: true },
+                    digest: { watch: true },
+                },
+            };
+            await second.findNewVersion(container, {
+                warn: jest.fn(),
+                error: jest.fn(),
+            });
+            expect(container.image.digest.watch).toBe(false);
+        });
     });
 
     describe('Configuration', () => {
@@ -746,6 +1173,46 @@ describe('Docker Watcher', () => {
                     displayName: 'Custom App',
                 }),
             );
+        });
+
+        test('should ignore temporary Docker recreate container rename event (#539, #294)', async () => {
+            await docker.register('watcher', 'docker', 'test', {});
+            const mockChildLog = { info: jest.fn() };
+            const mockLog = {
+                child: jest.fn().mockReturnValue(mockChildLog),
+                debug: jest.fn(),
+            };
+            docker.log = mockLog;
+            mockContainer.inspect.mockResolvedValue({
+                Name: '/a1b2c3d4e5f6_old-container-name',
+                Config: { Labels: {} },
+                State: { Status: 'running' },
+            });
+            const existingContainer = {
+                id: 'container123',
+                name: 'old-container-name',
+                displayName: 'old-container-name',
+                status: 'running',
+            };
+            storeContainer.getContainer.mockReturnValue(existingContainer);
+
+            // Docker/Portainer recreate rename: Actor name is prefixed with 12 hex chars
+            const event = JSON.stringify({
+                Action: 'rename',
+                Actor: {
+                    ID: 'container123',
+                    Attributes: {
+                        name: 'a1b2c3d4e5f6_old-container-name',
+                        oldName: 'old-container-name',
+                    },
+                },
+            });
+            await docker.onDockerEvent(Buffer.from(event));
+
+            // Name and displayName must NOT be corrupted by the temporary rename
+            expect(existingContainer.name).toBe('old-container-name');
+            expect(existingContainer.displayName).toBe('old-container-name');
+            expect(storeContainer.updateContainer).not.toHaveBeenCalled();
         });
 
         test('should update container displayName on event when explicit wud.display.name label is updated', async () => {
@@ -1906,6 +2373,42 @@ describe('Docker Watcher', () => {
             expect(container.image.digest.watch).toBe(false);
         });
 
+        test('should populate result.digest when resolving a SemVer candidate tag even when digest watching is disabled (fixes #1542)', async () => {
+            mockTag.isGreater.mockImplementation((t1, t2) => t1 > t2);
+            const container: any = {
+                image: {
+                    id: 'image123',
+                    name: 'library/nginx',
+                    registry: { name: 'hub' },
+                    tag: { value: '1.25.0', semver: true },
+                    digest: { watch: false, repo: 'sha256:abc123' },
+                },
+                labels: {},
+            };
+            const mockRegistry = {
+                getTags: jest.fn().mockResolvedValue(['1.25.0', '1.26.0']),
+                getImageManifestDigest: jest.fn().mockResolvedValue({
+                    digest: 'sha256:remote-digest-126',
+                    version: 2,
+                }),
+                shouldWatchDigest: jest.fn(() => false),
+            };
+            registry.getState.mockReturnValue({
+                registry: { hub: mockRegistry },
+            });
+            const mockLogChild = {
+                error: jest.fn(),
+                debug: jest.fn(),
+                warn: jest.fn(),
+            };
+
+            const result = await docker.findNewVersion(container, mockLogChild);
+
+            expect(result.tag).toBe('1.26.0');
+            expect(result.digest).toBe('sha256:remote-digest-126');
+            expect(container.image.digest.watch).toBe(false);
+        });
+
         test('should resolve the remote version and build date when the digest moved', async () => {
             const container = {
                 image: {
@@ -2152,6 +2655,173 @@ describe('Docker Watcher', () => {
             expect(mockLogChild.debug).toHaveBeenCalledWith(
                 'Cannot get remote image config (Boom!)',
             );
+        });
+
+        test('should populate result.created and respect cooldown delay when candidate tag is found and watch_digest is false (#1543)', async () => {
+            await docker.register('watcher', 'docker', 'test', {});
+            mockTag.isGreater.mockImplementation((t1, t2) => t1 > t2);
+            const container = {
+                id: 'container123',
+                name: 'test-app',
+                watcher: 'docker',
+                delay: '2h',
+                image: {
+                    id: 'image123',
+                    name: 'test/image',
+                    registry: {
+                        name: 'hub',
+                        url: 'https://registry-1.docker.io/v2',
+                    },
+                    tag: { value: '1.0.0', semver: true },
+                    digest: { watch: false },
+                    architecture: 'amd64',
+                    os: 'linux',
+                },
+            };
+            const candidateCreated = new Date(
+                Date.now() - 30 * 60 * 1000,
+            ).toISOString();
+            const mockRegistry = {
+                getTags: jest.fn().mockResolvedValue(['1.0.0', '1.1.0']),
+                getImageManifestDigest: jest.fn().mockResolvedValue({
+                    digest: 'sha256:candidate-digest-110',
+                    configDigest: 'sha256:config-110',
+                    version: 2,
+                }),
+                getImageConfig: jest.fn().mockResolvedValue({
+                    created: candidateCreated,
+                    version: '1.1.0',
+                }),
+                shouldWatchDigest: jest.fn(() => false),
+            };
+            registry.getState.mockReturnValue({
+                registry: { hub: mockRegistry },
+            });
+            const mockLogChild = {
+                error: jest.fn(),
+                debug: jest.fn(),
+                warn: jest.fn(),
+            };
+
+            const result = await docker.findNewVersion(container, mockLogChild);
+
+            expect(result.tag).toBe('1.1.0');
+            expect(result.digest).toBe('sha256:candidate-digest-110');
+            expect(result.created).toBe(candidateCreated);
+            expect(result.version).toBe('1.1.0');
+            expect(mockRegistry.getImageConfig).toHaveBeenCalledTimes(1);
+
+            // Verify container cool-down delay behavior using actual container model validation
+            const { validate: actualValidate } = jest.requireActual(
+                '../../../model/container',
+            );
+            const validated = actualValidate({
+                ...container,
+                result,
+            });
+            expect(validated.isCoolingDown).toBe(true);
+            expect(validated.coolingDownUntil).toBe(
+                new Date(candidateCreated).getTime() + 2 * 60 * 60 * 1000,
+            );
+            expect(validated.updateAvailable).toBe(false);
+        });
+
+        test('should reuse cached result.created for candidate tag when watch_digest is false (#1543)', async () => {
+            await docker.register('watcher', 'docker', 'test', {});
+            mockTag.isGreater.mockImplementation((t1, t2) => t1 > t2);
+            const candidateCreated = '2026-11-08T09:00:00.000Z';
+            const container = {
+                id: 'container123',
+                image: {
+                    id: 'image123',
+                    name: 'test/image',
+                    registry: {
+                        name: 'hub',
+                        url: 'https://registry-1.docker.io/v2',
+                    },
+                    tag: { value: '1.0.0', semver: true },
+                    digest: { watch: false },
+                    architecture: 'amd64',
+                    os: 'linux',
+                },
+            };
+            const mockRegistry = {
+                getTags: jest.fn().mockResolvedValue(['1.0.0', '1.1.0']),
+                getImageManifestDigest: jest.fn().mockResolvedValue({
+                    digest: 'sha256:candidate-digest-110',
+                    configDigest: 'sha256:config-110',
+                    version: 2,
+                }),
+                getImageConfig: jest.fn(),
+                shouldWatchDigest: jest.fn(() => false),
+            };
+            registry.getState.mockReturnValue({
+                registry: { hub: mockRegistry },
+            });
+            storeContainer.getContainer.mockReturnValueOnce({
+                id: 'container123',
+                result: {
+                    tag: '1.1.0',
+                    created: candidateCreated,
+                    version: '1.1.0',
+                },
+            });
+            const mockLogChild = {
+                error: jest.fn(),
+                debug: jest.fn(),
+                warn: jest.fn(),
+            };
+
+            const result = await docker.findNewVersion(container, mockLogChild);
+
+            expect(mockRegistry.getImageConfig).not.toHaveBeenCalled();
+            expect(result.tag).toBe('1.1.0');
+            expect(result.created).toBe(candidateCreated);
+            expect(result.version).toBe('1.1.0');
+        });
+
+        test('should set result.created from v1 manifest for candidate tag when watch_digest is false (#1543)', async () => {
+            await docker.register('watcher', 'docker', 'test', {});
+            mockTag.isGreater.mockImplementation((t1, t2) => t1 > t2);
+            const container = {
+                id: 'container123',
+                image: {
+                    id: 'image123',
+                    name: 'test/image',
+                    registry: {
+                        name: 'hub',
+                        url: 'https://registry-1.docker.io/v2',
+                    },
+                    tag: { value: '1.0.0', semver: true },
+                    digest: { watch: false },
+                    architecture: 'amd64',
+                    os: 'linux',
+                },
+            };
+            const mockRegistry = {
+                getTags: jest.fn().mockResolvedValue(['1.0.0', '1.1.0']),
+                getImageManifestDigest: jest.fn().mockResolvedValue({
+                    digest: 'sha256:legacy-candidate',
+                    created: '2026-01-01T00:00:00Z',
+                    version: 1,
+                }),
+                getImageConfig: jest.fn(),
+                shouldWatchDigest: jest.fn(() => false),
+            };
+            registry.getState.mockReturnValue({
+                registry: { hub: mockRegistry },
+            });
+            const mockLogChild = {
+                error: jest.fn(),
+                debug: jest.fn(),
+                warn: jest.fn(),
+            };
+
+            const result = await docker.findNewVersion(container, mockLogChild);
+
+            expect(mockRegistry.getImageConfig).not.toHaveBeenCalled();
+            expect(result.tag).toBe('1.1.0');
+            expect(result.created).toBe('2026-01-01T00:00:00Z');
         });
 
         test('should handle digest watching with v1 manifest', async () => {
@@ -2789,7 +3459,10 @@ describe('Docker Watcher', () => {
             expect(mockRegistry.getImageManifestDigest).toHaveBeenCalledTimes(
                 2,
             );
-            expect(result).toEqual({ tag: '1.9.0' });
+            expect(result).toEqual({
+                tag: '1.9.0',
+                digest: 'sha256:validContainer190',
+            });
             expect(mockLogChild.info).toHaveBeenCalledWith(
                 'Candidate tag 2.0.0 is a non-container OCI artifact, skipping',
             );
@@ -5875,6 +6548,52 @@ describe('Docker Watcher', () => {
                 expect(res.labels).toEqual(inspectObj.Config.Labels);
             });
 
+            test('addImageDetailsToContainer should extract org.opencontainers.image.version from image labels', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                mockDockerApi.getImage.mockReturnValue({
+                    inspect: jest.fn().mockResolvedValue({
+                        Id: 'sha256:image123',
+                        Architecture: 'amd64',
+                        Os: 'linux',
+                        Config: {
+                            Labels: {
+                                'org.opencontainers.image.version': '1.2.3',
+                            },
+                        },
+                    }),
+                });
+                const res = await docker.addImageDetailsToContainer({
+                    Id: 'container-version-test',
+                    Name: '/versioned-app',
+                    Image: 'myorg/versioned:latest',
+                    State: { Status: 'running' },
+                });
+                expect(res).toBeDefined();
+                expect(res.image.version).toBe('1.2.3');
+
+                // When label is empty string
+                mockDockerApi.getImage.mockReturnValue({
+                    inspect: jest.fn().mockResolvedValue({
+                        Id: 'sha256:image456',
+                        Architecture: 'amd64',
+                        Os: 'linux',
+                        Config: {
+                            Labels: {
+                                'org.opencontainers.image.version': '   ',
+                            },
+                        },
+                    }),
+                });
+                const resEmpty = await docker.addImageDetailsToContainer({
+                    Id: 'container-empty-version',
+                    Name: '/empty-version-app',
+                    Image: 'myorg/empty:latest',
+                    State: { Status: 'running' },
+                });
+                expect(resEmpty).toBeDefined();
+                expect(resEmpty.image.version).toBeUndefined();
+            });
+
             test('reconcileStoreContainers should prune dead containers from store that no longer exist in Docker (#1440)', async () => {
                 await docker.register('watcher', 'docker', 'test', {});
                 docker.pruneContainerFromStore = jest
@@ -6390,6 +7109,93 @@ describe('Docker Watcher', () => {
                 await docker.onDockerEvent(chunk);
                 expect(docker.destroyedContainers.has('restarted-123')).toBe(
                     false,
+                );
+            });
+        });
+
+        describe('Docker Recreate Temporary Name Handling (#539, #294)', () => {
+            test('isDockerRecreateTempName should identify recreate hash-prefixed names', () => {
+                expect(
+                    isDockerRecreateTempName('a1b2c3d4e5f6_my-container'),
+                ).toBe(true);
+                expect(isDockerRecreateTempName('1234567890ab_nginx_1')).toBe(
+                    true,
+                );
+                expect(isDockerRecreateTempName('000000000000_service')).toBe(
+                    true,
+                );
+                expect(isDockerRecreateTempName('my-container')).toBe(false);
+                expect(isDockerRecreateTempName('a1b2c3_short_hash')).toBe(
+                    false,
+                );
+                expect(
+                    isDockerRecreateTempName('a1b2c3d4e5f6g7_invalid_hex'),
+                ).toBe(false);
+                expect(isDockerRecreateTempName(undefined)).toBe(false);
+                expect(isDockerRecreateTempName('')).toBe(false);
+            });
+
+            test('isContainerToWatch should return false for temporary recreate container names', () => {
+                expect(
+                    isContainerToWatch(
+                        undefined,
+                        true,
+                        'a1b2c3d4e5f6_my-service',
+                    ),
+                ).toBe(false);
+                expect(
+                    isContainerToWatch(undefined, true, 'legitimate-service'),
+                ).toBe(true);
+            });
+
+            test('addImageDetailsToContainer should not adopt temporary recreate container name or update displayName', async () => {
+                await docker.register('watcher', 'docker', 'test', {});
+                mockImage.inspect.mockResolvedValue({
+                    Architecture: 'amd64',
+                    Os: 'linux',
+                    Config: { Labels: {} },
+                });
+                storeContainer.getContainer.mockReturnValue({
+                    id: 'c123',
+                    name: 'my-service',
+                    displayName: 'my-service',
+                    labels: {},
+                });
+                const containerInspect = {
+                    Id: 'c123',
+                    Image: 'sha256:img123',
+                    Name: '/a1b2c3d4e5f6_my-service',
+                    Config: {
+                        Image: 'test-image:latest',
+                        Labels: {},
+                    },
+                };
+
+                const res =
+                    await docker.addImageDetailsToContainer(containerInspect);
+
+                expect(res.name).toBe('my-service');
+                expect(res.displayName).toBe('my-service');
+            });
+
+            test('runReconcileContainer should prune container from store and return undefined when name is temporary recreate name', async () => {
+                docker.register('watcher', 'docker', 'test', {});
+                mockContainer.inspect.mockResolvedValue({
+                    Id: 'c123',
+                    Name: '/a1b2c3d4e5f6_my-service',
+                    Config: { Labels: {} },
+                    State: { Status: 'running' },
+                });
+                storeContainer.getContainer.mockReturnValue({
+                    id: 'c123',
+                    name: 'a1b2c3d4e5f6_my-service',
+                });
+
+                const result = await docker.runReconcileContainer('c123');
+
+                expect(result).toBeUndefined();
+                expect(storeContainer.deleteContainer).toHaveBeenCalledWith(
+                    'c123',
                 );
             });
         });

@@ -129,6 +129,11 @@
           <v-icon v-else-if="updateKind.semverDiff === 'major'" color="error"
             >mdi-alert-decagram</v-icon
           >
+          <v-icon
+            v-else-if="updateKind.semverDiff === 'rebuild' || updateKind.semverDiff === 'same'"
+            color="info"
+            >mdi-refresh</v-icon
+          >
           <v-icon v-else color="warning">mdi-alert</v-icon>
         </template>
         <v-list-item-title>{{ $t('update.kind') }}</v-list-item-title>
