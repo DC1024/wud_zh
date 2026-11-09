@@ -150,9 +150,7 @@ describe('upgrade from a legacy fork database', () => {
             '0005_image_and_result_version',
         );
         // Unrelated rows are never touched.
-        expect(rows.find((r) => r.id === 6)?.name).toBe(
-            '0006_upstream_other',
-        );
+        expect(rows.find((r) => r.id === 6)?.name).toBe('0006_upstream_other');
         // Our fork migration lives under its own id.
         expect(rows.find((r) => r.id === FORK_ID)?.name).toBe(
             '9005_watched_containers',
