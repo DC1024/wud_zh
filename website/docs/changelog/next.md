@@ -42,7 +42,12 @@ description: Unreleased changes and upcoming features in WUD (What's Up Docker?)
 - 🐛 [TRIGGER] Fail fast when the XMPP server is unreachable instead of hanging forever (new `WUD_TRIGGER_XMPP_{trigger_name}_TIMEOUT` option)
 - 🐛 [REGISTRY] Mask proxy credentials in registry configurations
 - 🐛 [TRIGGER] Mask proxy credentials in HTTP trigger configurations
+- 🐛 [CORE] Preserve leading zeros and support padStart/padEnd in link templates (#1551)
+- 🐛 [REGISTRY] Optimize GHCR tag pagination with semver cursor and add registry rate limit pacing (#1552)
+- 🐛 [TRIGGER] Fix MQTT summary topics refresh on container update (#1550)
+- 🐛 [TRIGGER] Fix Telegram batch mode MarkdownV2 escaping and formatting (fixes #1548)
 - 🐛 [WATCHER] Fix cool-down delay ignored for tag updates when digest watching is disabled (#1543)
+- 🐛 [WATCHER] Fix Swarm service label update when image is unchanged (fixes #1549)
 - 🐛 [WATCHER] Populate candidate digest on SemVer updates when digest watching is disabled (fixes #1542)
 
 ---
