@@ -1,9 +1,10 @@
 name: Build and push WUD (zh-CN) image
 
-# 在推送 i18n-zh 分支或手动触发时，构建并推送汉化版镜像到 GHCR
+# 在推送 main / i18n-zh 分支或手动触发时，构建并推送汉化版镜像到 GHCR
+# main 是 B0 之后的唯一发布分支；i18n-zh 保留至归档完成，避免切换期发布中断。
 on:
   push:
-    branches: ["i18n-zh"]
+    branches: ["main", "i18n-zh"]
     # 纯文档 / CI 配置改动不需要重建镜像（改工作流本身不会影响镜像内容，
     # 语法错误会在下一次真实代码推送时暴露）
     paths-ignore:
@@ -19,7 +20,43 @@ permissions:
   packages: write
 
 jobs:
+  # 发布前的硬门禁：编译不过就不构建、不推 latest。
+  # 放在同一个 workflow 内，首次 push 即生效（workflow_run 依赖默认分支已有该文件，
+  # 切换分支的当次不触发，因此不采用）。
+  verify:
+    name: Verify build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            ui/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci --include=dev --omit=optional --no-audit --no-fund --no-update-notifier
+
+      - name: Build app
+        working-directory: app
+        run: npm run build
+
+      - name: Install ui dependencies
+        working-directory: ui
+        run: npm ci --omit=optional --no-audit --no-fund --no-update-notifier
+
+      - name: Build ui
+        working-directory: ui
+        run: npm run build
+
   build:
+    needs: [verify]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -43,6 +80,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-,format=short
+            type=raw,value=ops-0.0.0
 
       - name: Resolve WUD version
         id: ver

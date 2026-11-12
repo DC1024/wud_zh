@@ -104,7 +104,7 @@ jobs:
   update-screenshots:
     name: Update Documentation Screenshots
     needs: [build-docs]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'getwud/wud'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -310,7 +310,7 @@ jobs:
   deploy-docs:
     name: Deploy Docs
     needs: [build-docs, publish]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'getwud/wud'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
