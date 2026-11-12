@@ -2,13 +2,22 @@
 // WUD command trigger 脚本：驱动 docker.local 完成更新，更新完成后发成功/失败邮件。
 // 由 WUD command 触发器以环境变量 container_json 传入完整容器对象。
 //
-// ── 成功判据（满足其一即视为已更新）──────────────────────────────
-//   a) updateAvailable 变为 false  —— 本机镜像与 registry 已收敛（常规情况）；
-//   b) 本机镜像 digest（value 或 repo）相比更新前发生变化 —— 镜像确实被替换了；
-//   c) 容器 id 已变（说明被重建过）且本机 digest 已等于目标 digest。
-//   为什么需要 b/c)：拉取走的是 docker daemon 的 registry-mirrors，
-//   而 WUD 的远端 digest 查的是 WUD_REGISTRY_HUB_URL，两者是不同缓存，
-//   镜像站落后时 updateAvailable 会一直为 true，只用 (a) 会误报「更新失败」。
+// ── 成功判据（分级判定，高可信优先，且必须校验方向）──────────────
+//   旧实现是四条并列 if，谁先命中谁生效；其中「本机 digest 变了」这一条
+//   不区分升级还是降级，导致 2026-11-12 ttrss 被换成 6 月的旧镜像后
+//   仍被判为「更新成功」。现改为按可信度排序的判定链：
+//
+//   rank 3  updateAvailable=false 且 created 未倒退 —— 本机与 registry 收敛
+//   rank 3  本机 digest == 目标 digest 且容器已重建 —— 拿到目标镜像
+//   rank 2  镜像 created 前进（升级）—— 时间戳方向正确
+//   rank 0  镜像 created 倒退 —— **降级**，立即判失败并告警，不再继续等
+//   rank 1  digest 变了但 created 无法比较 —— 「待确认」，继续轮询；
+//           到截止时间仍停在 rank 1 则发「待确认」通知，不谎报成功
+//
+//   为什么保留「digest 变化」这条宽松线索：拉取走的是 docker daemon 的
+//   registry-mirrors，而 WUD 的远端 digest 查的是 WUD_REGISTRY_HUB_URL，
+//   两者是不同缓存，镜像站落后时 updateAvailable 会一直为 true，
+//   只用收敛判据会误报「更新失败」。但它现在只作为「待确认」，不再直接判成功。
 //
 // ── 2026-10-14 重要修复：按「容器名」轮询，不再按「容器 id」──────────
 //   旧实现是 `GET /api/containers/<id>`，而 WUD 的 docker 更新会**重建容器**，
@@ -28,7 +37,12 @@
 //   冷却期只需大于「一轮更新耗时」（拉取 + 重建 + 轮询，约 5~10 分钟）即可打断循环，
 //   因为一旦跳过就不会再有重建，也就不会再有下一次触发。
 const fs = require('fs');
-const nodemailer = require('/home/node/app/node_modules/nodemailer');
+// nodemailer 延迟到真正发信时再 require：
+// ① 镜像内路径固定为 /home/node/app/node_modules，单测环境没有这个路径；
+// ② 只在发信分支加载，脚本被 require 做纯函数测试时不会因缺依赖直接崩。
+function loadNodemailer() {
+  return require('/home/node/app/node_modules/nodemailer');
+}
 
 // API 鉴权：优先用显式 WUD_AUTH；否则由 WUD 容器自带的
 // WUD_AUTH_ADMIN_USER / WUD_AUTH_ADMIN_PASSWORD 拼出（线上即此路径）。
@@ -190,6 +204,106 @@ function writeMarker(p, obj) {
   }
 }
 
+// ── 全局串行锁（跨容器，B4）──────────────────────────────────────
+// 04:00 一轮里多个容器会同时触发更新，全都去打同一个 registry，
+// 容易撞上 toomanyrequests。这里用 /store 下的锁文件把更新动作串起来：
+//   · 用 O_EXCL 原子创建，抢不到就带 jitter 轮询等待；
+//   · 持锁者超过 LOCK_STALE_MS 未释放（脚本被容器重启杀掉）视为陈旧，允许接管；
+//   · 等待超时则放行并打日志 —— 宁可并发也不要卡死更新。
+// 注意：锁只保护「拉取 + 重建 + 轮询」这段，冷却标记仍按容器名各自独立。
+const LOCK_PATH = MARKER_DIR + '/.wud-update.lock';
+const LOCK_STALE_MS = 40 * 60 * 1000; // > DEADLINE_MS，避免误接管仍在跑的更新
+const LOCK_WAIT_MS = 25 * 60 * 1000;
+const LOCK_POLL_MS = 5000;
+
+function readLock() {
+  try {
+    return JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+  } catch (e) {
+    return null;
+  }
+}
+
+function lockIsStale(info) {
+  if (!info || !info.ts) return true;
+  return Date.now() - info.ts > LOCK_STALE_MS;
+}
+
+async function acquireLock(name) {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let announced = false;
+  for (;;) {
+    try {
+      const fd = fs.openSync(LOCK_PATH, 'wx');
+      fs.writeSync(
+        fd,
+        JSON.stringify({ pid: process.pid, name, ts: Date.now(), time: fmtTime() }),
+      );
+      fs.closeSync(fd);
+      console.log('[lock] 已获取全局更新锁');
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') {
+        console.log('[lock] 创建失败（' + e.code + '），跳过加锁继续执行');
+        return false;
+      }
+      const info = readLock();
+      if (lockIsStale(info)) {
+        console.log(
+          '[lock] 发现陈旧锁（持有者 ' +
+            ((info && info.name) || '?') +
+            '，' +
+            ((info && info.time) || '?') +
+            '），接管',
+        );
+        try {
+          fs.unlinkSync(LOCK_PATH);
+        } catch (e2) {
+          /* 别人已删，下一轮重试 */
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        console.log(
+          '[lock] 等待超时，放弃加锁继续执行（避免卡死更新）',
+        );
+        return false;
+      }
+      if (!announced) {
+        console.log(
+          '[lock] 等待中：' +
+            ((info && info.name) || '?') +
+            ' 正在更新（' +
+            ((info && info.time) || '?') +
+            '）',
+        );
+        announced = true;
+      }
+      // jitter：避免多个等待者同一时刻醒来再一起抢
+      await sleep(LOCK_POLL_MS + Math.floor(Math.random() * 5000));
+    }
+  }
+}
+
+function releaseLock() {
+  try {
+    const info = readLock();
+    if (info && info.pid === process.pid) fs.unlinkSync(LOCK_PATH);
+  } catch (e) {
+    /* 释放失败不影响结果，陈旧锁会被下一个进程接管 */
+  }
+}
+
+// 错峰抖动：同一轮触发的多个容器在真正动手前随机等待一小段，
+// 把并发峰值摊平（配合全局锁，先到的先做）。
+async function jitter() {
+  const max = Number(process.env.WUD_UPDATE_JITTER_MS || 8000);
+  if (!Number.isFinite(max) || max <= 0) return;
+  const ms = Math.floor(Math.random() * max);
+  console.log('[jitter] 错峰等待 ' + ms + 'ms');
+  await sleep(ms);
+}
+
 /**
  * 按容器名重新定位容器。
  * 更新会重建容器 → id 变 → 必须用 name 查，不能用触发时拿到的旧 id。
@@ -204,6 +318,20 @@ async function findByName(name) {
   return (
     list.find((x) => x && (x.name === name || x.displayName === name)) || null
   );
+}
+
+// 比较两个 ISO 构建时间的方向。返回 'newer'（升级）/ 'older'（降级）/
+// 'same'（持平）/ 'unknown'（任一侧缺失或无法解析）。
+// 注意：这里刻意用 created 而不是 digest —— mirror 会重写 manifest，
+// ttrss 实测同一镜像有 3cca2ee5 / 46abe3e6 / 5eb139c5 三个互异的 digest。
+function compareCreated(before, after) {
+  if (!before || !after) return 'unknown';
+  const a = new Date(before).getTime();
+  const b = new Date(after).getTime();
+  if (Number.isNaN(a) || Number.isNaN(b)) return 'unknown';
+  if (b > a) return 'newer';
+  if (b < a) return 'older';
+  return 'same';
 }
 
 async function main() {
@@ -222,7 +350,11 @@ async function main() {
   // 因此必须是 let，绝不能是 const（否则严格模式下抛 Assignment to constant variable）。
   let beforeValue = (img.digest && img.digest.value) || null;
   let beforeRepo = (img.digest && img.digest.repo) || null;
+  // 镜像构建时间：判定「升级 / 持平 / 降级」的方向基准。
+  // digest 会被 mirror 重写（ttrss 实测三个 digest 互不相同），created 不会。
+  let beforeCreated = img.created || null;
   const targetV = uk.remoteValue || (c.result && c.result.digest) || '-';
+  const targetCreated = (c.result && c.result.created) || null;
 
   console.log(
     '[start] ' +
@@ -263,6 +395,17 @@ async function main() {
   let afterValue = beforeValue;
   let afterRepo = beforeRepo;
   let afterId = id;
+  let afterCreated = beforeCreated;
+  // 判定结果分级：null=未定，'confirmed'=高可信成功，'downgrade'=降级，
+  // 'pending'=只看到 digest 变化但方向不明（不谎报成功）
+  let verdict = null;
+
+  // 冷却期已放行，正式动手前先错峰再抢全局锁：
+  // 同一轮 04:00 触发多个容器时，避免同时向同一个 registry 打拉取请求。
+  if (!skip) {
+    await jitter();
+    await acquireLock(name);
+  }
 
   // 五修（2026-10-16）→ 2026-10-19 修正根因：整轮更新（触发 + 轮询确认）失败后
   // 自动重试，最多 UPDATE_RETRIES 次。首失败即发「将自动重试」通知，重试成功则发
@@ -274,7 +417,7 @@ async function main() {
   // 原注释把原因归到 WUD 后端「竞态」是错误的，特此更正。
   async function notify(subject, body) {
     try {
-      const transport = nodemailer.createTransport(MAIL);
+      const transport = loadNodemailer().createTransport(MAIL);
       await transport.sendMail({ from: FROM, to: TO, subject, text: body });
       console.log('[mail] sent: ' + subject);
     } catch (e) {
@@ -287,6 +430,7 @@ async function main() {
   if (!skip) {
     for (let attempt = 1; attempt <= UPDATE_RETRIES && !updated; attempt++) {
       errMsg = null;
+      verdict = null; // 每轮重试重新判定，避免上一轮的 pending 残留
       if (attempt > 1) {
         console.log(
           '[retry] 第 ' + attempt + '/' + UPDATE_RETRIES + ' 次尝试更新 ' + name,
@@ -375,30 +519,61 @@ async function main() {
         const ci = cc.image || {};
         const dv = (ci.digest && ci.digest.value) || null;
         const dr = (ci.digest && ci.digest.repo) || null;
+        const dc = ci.created || null;
         if (dv) afterValue = dv;
         if (dr) afterRepo = dr;
+        if (dc) afterCreated = dc;
         if (cc.id) afterId = cc.id;
 
         const rebuilt = Boolean(cc.id && id && cc.id !== id);
+        const direction = compareCreated(beforeCreated, dc);
+
+        // ── rank 0：镜像变旧 = 降级，立刻失败，不再等待 ──
+        if (direction === 'older') {
+          verdict = 'downgrade';
+          errMsg =
+            '检测到降级：镜像构建时间由 ' +
+            beforeCreated +
+            ' 倒退到 ' +
+            dc +
+            '（镜像站缓存不一致或 tag 被指回旧版本）。已中止判定，未计为成功。';
+          break;
+        }
+
+        // ── rank 3a：与 registry 收敛 ──
         if (cc.updateAvailable === false) {
-          updated = true;
+          verdict = 'confirmed';
           reason = 'updateAvailable 已变为 false（本机与 registry 收敛）';
           break;
         }
-        if (beforeValue && dv && dv !== beforeValue) {
-          updated = true;
-          reason = '本机镜像 digest 已变化（镜像被替换）';
-          break;
-        }
-        if (beforeRepo && dr && dr !== beforeRepo) {
-          updated = true;
-          reason = '本机镜像 repo digest 已变化';
-          break;
-        }
+
+        // ── rank 3b：拿到目标 digest 且已重建 ──
         if (rebuilt && targetV && dv && dv === targetV) {
-          updated = true;
+          verdict = 'confirmed';
           reason = '容器已重建且本机 digest 已等于目标 digest';
           break;
+        }
+
+        // ── rank 2：created 前进 = 升级 ──
+        if (direction === 'newer') {
+          verdict = 'confirmed';
+          reason =
+            '镜像构建时间前进（' + beforeCreated + ' -> ' + dc + '），判定为升级';
+          break;
+        }
+
+        // ── rank 1：digest 变了但方向无法确认 → 记为待确认，继续轮询 ──
+        if (
+          (beforeValue && dv && dv !== beforeValue) ||
+          (beforeRepo && dr && dr !== beforeRepo)
+        ) {
+          verdict = 'pending';
+          reason =
+            '本机镜像 digest 已变化，但构建时间无法确认方向（' +
+            (beforeCreated || '未知') +
+            ' -> ' +
+            (dc || '未知') +
+            '），继续观察';
         }
 
         rounds += 1;
@@ -440,16 +615,27 @@ async function main() {
           );
         }
       }
+      if (verdict === 'confirmed') {
+        updated = true;
+      }
       if (!updated) {
         errMsg =
-          '更新超时（' +
-          DEADLINE_MS / 60000 +
-          ' 分钟内未观察到镜像被替换；更新前本机 ' +
-          short(beforeValue) +
-          '，最后一次观测 ' +
-          short(afterValue) +
-          (afterId !== id ? '，容器已重建' : '，容器未重建') +
-          '）';
+          verdict === 'pending'
+            ? '待确认：' +
+              DEADLINE_MS / 60000 +
+              ' 分钟内只观察到镜像 digest 变化，无法确认是升级；更新前 ' +
+              beforeCreated +
+              '，最后观测 ' +
+              afterCreated +
+              '。未计为成功，请人工核对。'
+            : '更新超时（' +
+              DEADLINE_MS / 60000 +
+              ' 分钟内未观察到镜像被替换；更新前本机 ' +
+              short(beforeValue) +
+              '，最后一次观测 ' +
+              short(afterValue) +
+              (afterId !== id ? '，容器已重建' : '，容器未重建') +
+              '）';
       }
       } catch (e) {
         errMsg = '更新调用失败: ' + e.message;
@@ -463,6 +649,11 @@ async function main() {
           '/' +
           UPDATE_RETRIES +
           ' 次尝试成功';
+        break;
+      }
+      // 降级是确定性结论，重试只会再拉回同一个旧镜像，直接终止
+      if (verdict === 'downgrade') {
+        console.log('[abort] 判定降级，跳过剩余重试');
         break;
       }
       if (attempt < UPDATE_RETRIES) {
@@ -496,15 +687,25 @@ async function main() {
     reason = '测试模式（WUD_SKIP_UPDATE=1，未实际更新）';
   }
 
+  // 更新动作已结束（无论成败），立刻释放全局锁，让下一个等待者继续。
+  if (!skip) releaseLock();
+
   const ok = !errMsg;
   writeMarker(mp, {
     ts: Date.now(),
     time: fmtTime(),
     ok,
+    verdict: verdict || (ok ? 'confirmed' : 'failed'),
     reason: reason || errMsg,
   });
 
-  const subject = ok ? '容器更新成功: ' + name : '容器更新失败: ' + name;
+  const subject = ok
+    ? '容器更新成功: ' + name
+    : verdict === 'downgrade'
+      ? '容器更新被判定为降级: ' + name
+      : verdict === 'pending'
+        ? '容器更新待确认: ' + name
+        : '容器更新失败: ' + name;
   const body = ok
     ? [
         '容器 ' + name + ' 已成功更新。',
@@ -512,6 +713,7 @@ async function main() {
         '旧镜像: ' + short(beforeValue),
         '新镜像: ' + short(afterValue),
         '目标(registry): ' + short(targetV),
+        '构建时间: ' + (beforeCreated || '?') + ' -> ' + (afterCreated || '?'),
         '判据: ' + (reason || '-'),
         '容器 id: ' + short(id) + ' -> ' + short(afterId),
         '时间: ' + fmtTime(),
@@ -520,7 +722,8 @@ async function main() {
         '容器 ' + name + ' 更新未成功。',
         '镜像: ' + imageLabel,
         '本机: ' + short(beforeValue) + ' -> ' + short(afterValue),
-        '目标: ' + short(targetV),
+        '构建时间: ' + (beforeCreated || '?') + ' -> ' + (afterCreated || '?'),
+        '目标: ' + short(targetV) + '（构建于 ' + (targetCreated || '?') + '）',
         '容器 id: ' + short(id) + ' -> ' + short(afterId),
         '原因: ' + errMsg,
         '时间: ' + fmtTime(),
@@ -529,7 +732,13 @@ async function main() {
   await notify(subject, body);
 }
 
-main().catch((e) => {
-  console.error('FATAL', e);
-  process.exit(1);
-});
+// 作为脚本直接执行时（node /store/wud-success-update.js）才跑 main；
+// 被单测 require 时只导出纯函数，避免触发真实更新与发信。
+if (require.main === module) {
+  main().catch((e) => {
+    console.error('FATAL', e);
+    process.exit(1);
+  });
+}
+
+module.exports = { compareCreated };

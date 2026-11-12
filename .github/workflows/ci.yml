@@ -48,6 +48,12 @@ jobs:
       # unless something fails the build. See ui/scripts/check-i18n-hardcoded.cjs.
       - name: Check for hard-coded UI strings
         run: node ui/scripts/check-i18n-hardcoded.cjs
+      # ops/ 是随镜像分发的运维脚本，不参与 app 的 tsc/eslint 配置，
+      # 因此单独跑语法检查与单测，避免坏脚本被 entrypoint 同步到 /store。
+      - name: Lint and test ops scripts
+        run: |
+          node --check ops/wud-success-update.js
+          node --test ops/wud-success-update.test.js
 
   unit-test:
     name: Unit Tests
