@@ -8,7 +8,7 @@ const {
 } = require('@cucumber/cucumber');
 const configuration = require('../../config');
 
-setDefaultTimeout(20 * 1000);
+setDefaultTimeout(30 * 1000);
 
 let client = null;
 const receivedMessages = new Map();
@@ -109,8 +109,39 @@ Then(/^no MQTT message should be published on topic "([^"]*)"$/, (topic) => {
     );
 });
 
+// 等待某个 topic 出现**期望值**，而不是拿到缓存里的第一条就返回。
+// 起因：watcher 的 running 主题会先发 true、stop 后再发 false；旧实现
+// 命中缓存立即返回 true，导致 "expected false but got true" 的偶发失败。
+function waitForMessageValue(topic, expected, timeoutMs = 8000) {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve, reject) => {
+        const tick = () => {
+            const current = receivedMessages.get(topic);
+            if (current === expected) {
+                resolve(current);
+                return;
+            }
+            if (Date.now() >= deadline) {
+                if (current === undefined) {
+                    reject(
+                        new Error(
+                            `Timeout waiting for MQTT message on topic: ${topic}`,
+                        ),
+                    );
+                    return;
+                }
+                resolve(current);
+                return;
+            }
+            setTimeout(tick, 100);
+        };
+        tick();
+    });
+}
+
+
 Then(/^the MQTT message on topic "([^"]*)" should equal "([^"]*)"$/, async (topic, expected) => {
-    const payload = await waitForMessage(topic);
+    const payload = await waitForMessageValue(topic, expected);
     assert.strictEqual(payload, expected, `Topic ${topic} expected "${expected}" but got "${payload}"`);
 });
 
