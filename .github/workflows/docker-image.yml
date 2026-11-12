@@ -80,7 +80,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-,format=short
-            type=raw,value=ops-0.4.0
+            type=raw,value=ops-0.4.1
 
       - name: Resolve WUD version
         id: ver

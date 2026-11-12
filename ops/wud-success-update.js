@@ -334,6 +334,78 @@ function compareCreated(before, after) {
   return 'same';
 }
 
+// 把「这一轮观测该判成什么」抽成纯函数，便于单测回放真实事故。
+// 返回值：
+//   { verdict: 'downgrade', errMsg }  —— 降级，立即失败并中止重试
+//   { verdict: 'confirmed', reason }  —— 高可信成功
+//   { verdict: 'pending', reason }    —— digest 变了但方向不明，继续轮询
+//   { verdict: null }                 —— 尚无变化，继续轮询
+// 判据优先级刻意如此：先排除降级，再认收敛 / 重建 / 时间前进，最后才降级为
+// pending。这样「镜像被 mirror 换回旧版」不会被 digest 变化误判成成功。
+function decideVerdict(o) {
+  const direction = compareCreated(o.beforeCreated, o.afterCreated);
+
+  // rank 0：镜像变旧 = 降级，立刻失败，不再等待
+  if (direction === 'older') {
+    return {
+      verdict: 'downgrade',
+      errMsg:
+        '检测到降级：镜像构建时间由 ' +
+        o.beforeCreated +
+        ' 倒退到 ' +
+        o.afterCreated +
+        '（镜像站缓存不一致或 tag 被指回旧版本）。已中止判定，未计为成功。',
+    };
+  }
+
+  // rank 3a：与 registry 收敛
+  if (o.updateAvailable === false) {
+    return {
+      verdict: 'confirmed',
+      reason: 'updateAvailable 已变为 false（本机与 registry 收敛）',
+    };
+  }
+
+  // rank 3b：拿到目标 digest 且已重建
+  if (o.rebuilt && o.targetV && o.afterValue && o.afterValue === o.targetV) {
+    return {
+      verdict: 'confirmed',
+      reason: '容器已重建且本机 digest 已等于目标 digest',
+    };
+  }
+
+  // rank 2：created 前进 = 升级
+  if (direction === 'newer') {
+    return {
+      verdict: 'confirmed',
+      reason:
+        '镜像构建时间前进（' +
+        o.beforeCreated +
+        ' -> ' +
+        o.afterCreated +
+        '），判定为升级',
+    };
+  }
+
+  // rank 1：digest 变了但方向无法确认 → 待确认，继续轮询（不谎报成功）
+  if (
+    (o.beforeValue && o.afterValue && o.afterValue !== o.beforeValue) ||
+    (o.beforeRepo && o.afterRepo && o.afterRepo !== o.beforeRepo)
+  ) {
+    return {
+      verdict: 'pending',
+      reason:
+        '本机镜像 digest 已变化，但构建时间无法确认方向（' +
+        (o.beforeCreated || '未知') +
+        ' -> ' +
+        (o.afterCreated || '未知') +
+        '），继续观察',
+    };
+  }
+
+  return { verdict: null };
+}
+
 async function main() {
   const c = JSON.parse(process.env.container_json || '{}');
   const id = c.id;
@@ -526,54 +598,33 @@ async function main() {
         if (cc.id) afterId = cc.id;
 
         const rebuilt = Boolean(cc.id && id && cc.id !== id);
-        const direction = compareCreated(beforeCreated, dc);
 
-        // ── rank 0：镜像变旧 = 降级，立刻失败，不再等待 ──
-        if (direction === 'older') {
+        // 判定链走 decideVerdict()，与单测共用同一份逻辑，
+        // 避免「测试绿了、生产走的却是另一段 if」的假绿。
+        const d = decideVerdict({
+          beforeCreated,
+          afterCreated: dc,
+          beforeValue,
+          afterValue: dv,
+          beforeRepo,
+          afterRepo: dr,
+          updateAvailable: cc.updateAvailable,
+          rebuilt,
+          targetV,
+        });
+        if (d.verdict === 'downgrade') {
           verdict = 'downgrade';
-          errMsg =
-            '检测到降级：镜像构建时间由 ' +
-            beforeCreated +
-            ' 倒退到 ' +
-            dc +
-            '（镜像站缓存不一致或 tag 被指回旧版本）。已中止判定，未计为成功。';
+          errMsg = d.errMsg;
           break;
         }
-
-        // ── rank 3a：与 registry 收敛 ──
-        if (cc.updateAvailable === false) {
+        if (d.verdict === 'confirmed') {
           verdict = 'confirmed';
-          reason = 'updateAvailable 已变为 false（本机与 registry 收敛）';
+          reason = d.reason;
           break;
         }
-
-        // ── rank 3b：拿到目标 digest 且已重建 ──
-        if (rebuilt && targetV && dv && dv === targetV) {
-          verdict = 'confirmed';
-          reason = '容器已重建且本机 digest 已等于目标 digest';
-          break;
-        }
-
-        // ── rank 2：created 前进 = 升级 ──
-        if (direction === 'newer') {
-          verdict = 'confirmed';
-          reason =
-            '镜像构建时间前进（' + beforeCreated + ' -> ' + dc + '），判定为升级';
-          break;
-        }
-
-        // ── rank 1：digest 变了但方向无法确认 → 记为待确认，继续轮询 ──
-        if (
-          (beforeValue && dv && dv !== beforeValue) ||
-          (beforeRepo && dr && dr !== beforeRepo)
-        ) {
+        if (d.verdict === 'pending') {
           verdict = 'pending';
-          reason =
-            '本机镜像 digest 已变化，但构建时间无法确认方向（' +
-            (beforeCreated || '未知') +
-            ' -> ' +
-            (dc || '未知') +
-            '），继续观察';
+          reason = d.reason;
         }
 
         rounds += 1;
@@ -741,4 +792,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { compareCreated };
+module.exports = { compareCreated, decideVerdict };
