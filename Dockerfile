@@ -34,6 +34,12 @@ RUN apk add --no-cache tzdata openssl curl bash libstdc++
 COPY Docker.entrypoint.sh /usr/bin/entrypoint.sh
 RUN chmod +x /usr/bin/entrypoint.sh
 
+# Copy ops assets (update success script + version stamp).
+# The entrypoint syncs these into /store at startup so that a plain
+# `docker pull` also delivers script fixes. Kept out of the app build stages
+# on purpose: nothing here is compiled or bundled.
+COPY ops/ /opt/wud-ops/
+
 # Copy app runtime artifacts
 COPY --from=app-build /home/node/app/node_modules ./node_modules
 COPY --from=app-build /home/node/app/dist ./dist

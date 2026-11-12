@@ -66,8 +66,8 @@ const TO =
   process.env.MAIL_TO ||
   '<YOUR_EMAIL>';
 // 发件人：WUD 原生 SMTP trigger 用 FROM_NAME + FROM_ADDRESS 拼成
-// `"WUD" <dcchen@88.com>`，所以收件端显示 WUD。这里必须同样拼上显示名，
-// 否则只传裸地址，邮件客户端会按地址本地部分显示成 `dcchen`，
+// `"WUD" <ops@example.com>`，所以收件端显示 WUD。这里必须同样拼上显示名，
+// 否则只传裸地址，邮件客户端会按地址本地部分显示成 `ops`，
 // 导致同一套通知出现两种署名。
 const RAW_FROM =
   process.env.WUD_TRIGGER_SMTP_MAIL_FROM_ADDRESS ||

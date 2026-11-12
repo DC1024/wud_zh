@@ -139,7 +139,6 @@ function waitForMessageValue(topic, expected, timeoutMs = 8000) {
     });
 }
 
-
 Then(/^the MQTT message on topic "([^"]*)" should equal "([^"]*)"$/, async (topic, expected) => {
     const payload = await waitForMessageValue(topic, expected);
     assert.strictEqual(payload, expected, `Topic ${topic} expected "${expected}" but got "${payload}"`);
