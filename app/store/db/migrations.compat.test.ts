@@ -71,7 +71,9 @@ describe('fork migration id isolation', () => {
         const upstreamRange = migrations.filter(
             (m) => m.id >= 0 && m.id < 1000,
         );
-        expect(upstreamRange.map((m) => m.id)).toEqual([0, 1, 2, 3, 4, 5]);
+        // Upstream now occupies 0..6 (0006_result_candidates landed in the
+        // 9.8.0-next series); keep this list in sync when upstream adds ids.
+        expect(upstreamRange.map((m) => m.id)).toEqual([0, 1, 2, 3, 4, 5, 6]);
     });
 
     test('every fork-owned migration id is at or above the fork base', () => {
@@ -137,9 +139,11 @@ describe('upgrade from a legacy fork database', () => {
     test('leaves an upstream row on id 5 alone when one already exists', () => {
         const db = freshDb();
         runMigrations(db);
-        // Upstream owns id 5 out of the box now; add an unrelated higher row too.
+        // Upstream owns id 5 (and now 6) out of the box; add an unrelated
+        // higher row too. Use id 7 so it cannot collide with upstream's real
+        // 0006_result_candidates migration.
         db.prepare(
-            "INSERT INTO __wud_migrations (id, name) VALUES (6, '0006_upstream_other')",
+            "INSERT INTO __wud_migrations (id, name) VALUES (7, '0007_upstream_other')",
         ).run();
 
         runMigrations(db);
@@ -150,7 +154,7 @@ describe('upgrade from a legacy fork database', () => {
             '0005_image_and_result_version',
         );
         // Unrelated rows are never touched.
-        expect(rows.find((r) => r.id === 6)?.name).toBe('0006_upstream_other');
+        expect(rows.find((r) => r.id === 7)?.name).toBe('0007_upstream_other');
         // Our fork migration lives under its own id.
         expect(rows.find((r) => r.id === FORK_ID)?.name).toBe(
             '9005_watched_containers',
