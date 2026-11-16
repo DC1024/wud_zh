@@ -88,6 +88,11 @@ export const containerResultsHistory = sqliteTable(
         created: text('created'),
         version: text('version'),
         link: text('link'),
+        candidates: text('candidates', { mode: 'json' }).$type<{
+            major?: string;
+            minor?: string;
+            patch?: string;
+        }>(),
         updateAvailable: integer('update_available', { mode: 'boolean' })
             .notNull()
             .default(false),

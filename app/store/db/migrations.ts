@@ -191,8 +191,15 @@ export const migrations: Migration[] = [
         ],
     },
     {
-        // Fork-owned migration. Parked at 9005 (not 5) so it can never occupy an
-        // id upstream is about to use; see FORK_MIGRATION_ID_BASE above.
+        id: 6,
+        name: '0006_result_candidates',
+        sql: [
+            `ALTER TABLE container_results_history ADD COLUMN candidates TEXT;`,
+        ],
+    },
+    {
+        // Fork-owned migration. Parked at 9005 (not 5 or 6) so it can never
+        // occupy an id upstream is about to use; see FORK_MIGRATION_ID_BASE.
         id: 9005,
         name: '9005_watched_containers',
         creates: ['watched_containers'],

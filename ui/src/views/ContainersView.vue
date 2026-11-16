@@ -171,6 +171,26 @@
                     </template>
                     <span class="text-caption">{{ $t('containers.copyToClipboard') }}</span>
                   </v-tooltip>
+                  <v-tooltip
+                    bottom
+                    v-for="candidate in getOtherUpdateCandidates(item.raw || item)"
+                    :key="candidate.kind"
+                  >
+                    <template v-slot:activator="{ props }">
+                      <v-chip
+                        label
+                        variant="tonal"
+                        :color="getSemverDiffColor(candidate.kind)"
+                        size="small"
+                        v-bind="props"
+                        @click.stop="copyToClipboard('copy.candidateVersion', candidate.tag, { kind: candidate.kind })"
+                        class="cursor-pointer font-weight-bold ml-1"
+                      >
+                        {{ candidate.tag }}
+                      </v-chip>
+                    </template>
+                    <span class="text-caption">{{ $t('containers.candidateUpdateHint', { kind: candidate.kind }) }}</span>
+                  </v-tooltip>
                   <v-tooltip bottom v-if="(item.raw ? item.raw.result?.changelogUrl : item.result?.changelogUrl) || (item.raw ? item.raw.changelogUrl : item.changelogUrl)">
                     <template v-slot:activator="{ props }">
                       <v-btn
@@ -644,7 +664,7 @@ export default defineComponent({
       watcherSelected: "",
       stackSelected: "",
       searchQuery: "",
-      updateKindSelected: "",
+      updateKindSelected: [] as string[],
       updateAvailableSelected: false,
       groupByLabel: "",
       oldestFirst: false,
@@ -817,6 +837,7 @@ export default defineComponent({
           ) {
             kinds.push(c.updateKind.semverDiff);
           }
+          kinds.push(...Object.keys(c.result?.candidates || {}));
         });
       return [...new Set(kinds)].sort();
     },
@@ -863,11 +884,12 @@ export default defineComponent({
         .filter((c) => (this.watcherSelected ? this.watcherSelected === c.watcher : true))
         .filter((c) => (this.stackSelected ? this.stackSelected === c.stack : true))
         .filter((c) => {
-          if (!this.updateKindSelected) return true;
-          if (this.updateKindSelected === "digest") {
-            return c.updateKind?.kind === "digest";
-          }
-          return c.updateKind?.semverDiff === this.updateKindSelected;
+          if (!this.updateKindSelected.length) return true;
+          return this.updateKindSelected.some((kind: string) =>
+            kind === "digest"
+              ? c.updateKind?.kind === "digest"
+              : c.updateKind?.semverDiff === kind || Boolean(c.result?.candidates?.[kind]),
+          );
         })
         .filter((c) => (this.updateAvailableSelected ? c.updateAvailable : true))
         .filter((c) => {
@@ -937,35 +959,44 @@ export default defineComponent({
       return newVersion;
     },
 
-    getNewVersionClass(container: any) {
-      if (container.updateKind?.semverDiff) {
-        switch (container.updateKind.semverDiff) {
-          case "major":
-            return "error";
-          case "minor":
-            return "warning";
-          case "patch":
-            return "success";
-          case "rebuild":
-          case "same":
-            return "info";
-        }
+    getSemverDiffColor(semverDiff?: string) {
+      switch (semverDiff) {
+        case "major":
+          return "error";
+        case "minor":
+          return "warning";
+        case "patch":
+          return "success";
+        default:
+          return "info";
       }
-      return "info";
     },
 
-    async copyToClipboard(kind: string, value: string) {
+    getNewVersionClass(container: any) {
+      return this.getSemverDiffColor(container.updateKind?.semverDiff);
+    },
+
+    getOtherUpdateCandidates(container: any) {
+      const candidates = container.result?.candidates || {};
+      return ["major", "minor", "patch"]
+        .filter((kind) => candidates[kind] && candidates[kind] !== container.result?.tag)
+        .map((kind) => ({ kind, tag: candidates[kind] }));
+    },
+
+    async copyToClipboard(kind: string, value: string, params?: Record<string, string>) {
       const copied = await copyToClipboard(value);
       if (copied) {
         (this as any).$eventBus.emit(
           "notify",
-          (this as any).$t("common.copied", { kind: (this as any).$t(kind) }),
+          (this as any).$t("common.copied", {
+            kind: (this as any).$t(kind, params),
+          }),
         );
       } else {
         (this as any).$eventBus.emit(
           "notify",
           (this as any).$t("common.copyFailed", {
-            kind: (this as any).$t(kind),
+            kind: (this as any).$t(kind, params),
           }),
           "warning",
         );
@@ -1151,14 +1182,13 @@ export default defineComponent({
     onUpdateAvailableChanged() { this.updateAvailableSelected = !this.updateAvailableSelected; this.updateQueryParams(); },
     onOldestFirstChanged() { this.oldestFirst = !this.oldestFirst; this.updateQueryParams(); },
     onGroupByLabelChanged(val: string) { this.groupByLabel = val; this.updateQueryParams(); },
-    onUpdateKindChanged(val: string) { this.updateKindSelected = val; this.updateQueryParams(); },
-
+    onUpdateKindChanged(val: string[]) { this.updateKindSelected = val ?? []; this.updateQueryParams(); },
     onResetFilters() {
       this.registrySelected = "";
       this.watcherSelected = "";
       this.stackSelected = "";
       this.searchQuery = "";
-      this.updateKindSelected = "";
+      this.updateKindSelected = [];
       this.groupByLabel = "";
       this.updateAvailableSelected = false;
       this.oldestFirst = false;
@@ -1169,7 +1199,7 @@ export default defineComponent({
       if (this.registrySelected) query["registry"] = this.registrySelected;
       if (this.watcherSelected) query["watcher"] = this.watcherSelected;
       if (this.stackSelected) query["stack"] = this.stackSelected;
-      if (this.updateKindSelected) query["update-kind"] = this.updateKindSelected;
+      if (this.updateKindSelected.length) query["update-kind"] = this.updateKindSelected.join(",");
       if (this.updateAvailableSelected) query["update-available"] = String(this.updateAvailableSelected);
       if (this.oldestFirst) query["oldest-first"] = String(this.oldestFirst);
       if (this.groupByLabel) query["group-by-label"] = this.groupByLabel;
@@ -1258,7 +1288,7 @@ export default defineComponent({
         if (rs) vm.registrySelected = rs;
         if (ws) vm.watcherSelected = ws;
         if (ss) vm.stackSelected = ss;
-        if (uk) vm.updateKindSelected = uk;
+        if (uk) vm.updateKindSelected = String(uk).split(",").filter(Boolean);
         if (ua) vm.updateAvailableSelected = String(ua).toLowerCase() === "true";
         if (of) vm.oldestFirst = String(of).toLowerCase() === "true";
         if (gl) vm.groupByLabel = gl;
