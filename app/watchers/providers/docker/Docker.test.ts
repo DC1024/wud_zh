@@ -6,6 +6,7 @@ import Docker, {
     formatErrorMessage,
     getRepoDigest,
     isDockerRecreateTempName,
+    MAX_DOCKER_EVENT_BYTES,
 } from './Docker';
 import Registry, {
     UnsupportedArtifactError,
@@ -918,7 +919,7 @@ describe('Docker Watcher', () => {
             expect(docker.watchCronDebounced).not.toHaveBeenCalled();
         });
 
-        test('should process chunked create/destroy events', async () => {
+        test('should process a Docker event split across chunks', async () => {
             const mockStream = { on: jest.fn(), once: jest.fn() };
             mockDockerApi.getEvents.mockImplementation((options, callback) => {
                 callback(null, mockStream);
@@ -937,11 +938,251 @@ describe('Docker Watcher', () => {
 
             dataHandler(Buffer.from('\n'));
             expect(docker.onDockerEvent).toHaveBeenCalledTimes(1);
-
-            const calledWith = docker.onDockerEvent.mock.calls[0][0].toString();
-            expect(calledWith).toBe(
-                '{"Action":"create","id":"container123"}\n',
+            expect(docker.onDockerEvent.mock.calls[0][0].toString()).toBe(
+                '{"Action":"create","id":"container123"}',
             );
+        });
+
+        test('should process multiple Docker events within one chunk', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            dataHandler(
+                Buffer.from(
+                    '{"Action":"die","id":"one"}\n' +
+                        '{"Action":"stop","id":"one"}\n',
+                ),
+            );
+
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(2);
+            expect(
+                docker.onDockerEvent.mock.calls.map(
+                    ([event]) => JSON.parse(event.toString()).Action,
+                ),
+            ).toEqual(['die', 'stop']);
+        });
+
+        test('should retain a trailing partial event after complete events', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            dataHandler(Buffer.from('{"Action":"die"}\n{"Action":"st'));
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(1);
+
+            dataHandler(Buffer.from('op"}\n{"Action":"start"}\n'));
+            expect(
+                docker.onDockerEvent.mock.calls.map(
+                    ([event]) => JSON.parse(event.toString()).Action,
+                ),
+            ).toEqual(['die', 'stop', 'start']);
+        });
+
+        test('should preserve UTF-8 data split across chunks', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            const event = Buffer.from(JSON.stringify({ name: 'café' }) + '\n');
+            const split = event.indexOf(Buffer.from('é')) + 1;
+            dataHandler(event.subarray(0, split));
+            dataHandler(event.subarray(split));
+
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(1);
+            expect(
+                JSON.parse(docker.onDockerEvent.mock.calls[0][0].toString()),
+            ).toEqual({ name: 'café' });
+        });
+
+        test('should drop oversized Docker events and resume at the next line', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+            const warn = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            docker.log.warn = warn;
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            dataHandler(Buffer.from('x'.repeat(MAX_DOCKER_EVENT_BYTES)));
+            dataHandler(Buffer.from('x'.repeat(10)));
+            dataHandler(Buffer.from('ignored\n{"Action":"start"}\n'));
+
+            expect(warn).toHaveBeenCalledWith(
+                'Discarding oversized Docker event',
+            );
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(1);
+            expect(docker.onDockerEvent.mock.calls[0][0].toString()).toBe(
+                '{"Action":"start"}',
+            );
+        });
+
+        test('should drop a single-chunk oversized Docker event and recover on next event', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+            const warn = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            docker.log.warn = warn;
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            dataHandler(
+                Buffer.from(
+                    `${'x'.repeat(MAX_DOCKER_EVENT_BYTES + 1)}\n{"Action":"start"}\n`,
+                ),
+            );
+
+            expect(warn).toHaveBeenCalledWith(
+                'Discarding oversized Docker event',
+            );
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(1);
+            expect(docker.onDockerEvent.mock.calls[0][0].toString()).toBe(
+                '{"Action":"start"}',
+            );
+        });
+
+        test('should ignore empty LF and CRLF lines and strip trailing CR from payloads', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+            const warn = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            docker.log.warn = warn;
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            dataHandler(
+                Buffer.from(
+                    '\r\n\n{"Action":"die"}\r\n\r\n\n{"Action":"stop"}\r\n\r\n',
+                ),
+            );
+
+            expect(warn).not.toHaveBeenCalled();
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(2);
+            expect(
+                docker.onDockerEvent.mock.calls.map(([event]) =>
+                    event.toString(),
+                ),
+            ).toEqual(['{"Action":"die"}', '{"Action":"stop"}']);
+        });
+
+        test('should handle split CRLF boundaries and embedded CR across chunks', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+            const warn = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            docker.log.warn = warn;
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            // Empty split CRLF line
+            dataHandler(Buffer.from('\r'));
+            dataHandler(Buffer.from('\n'));
+            // Payload with split CRLF boundary
+            dataHandler(Buffer.from('{"Action":"die"}\r'));
+            dataHandler(Buffer.from('\n'));
+            // Embedded CR split across chunks (not followed by LF)
+            dataHandler(Buffer.from('{"Action":\r'));
+            dataHandler(Buffer.from('"stop"}\r\n'));
+
+            expect(warn).not.toHaveBeenCalled();
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(2);
+            expect(docker.onDockerEvent.mock.calls[0][0].toString()).toBe(
+                '{"Action":"die"}',
+            );
+            expect(
+                JSON.parse(docker.onDockerEvent.mock.calls[1][0].toString()),
+            ).toEqual({ Action: 'stop' });
+        });
+
+        test('should accept a complete Docker event at the size limit with LF and CRLF boundaries', async () => {
+            const mockStream = { on: jest.fn(), once: jest.fn() };
+            mockDockerApi.getEvents.mockImplementation((options, callback) => {
+                callback(null, mockStream);
+            });
+            docker.onDockerEvent = jest.fn();
+            const warn = jest.fn();
+
+            await docker.register('watcher', 'docker', 'test', {});
+            docker.log.warn = warn;
+            await docker.listenDockerEvents();
+
+            const dataHandler = mockStream.on.mock.calls.find(
+                (c) => c[0] === 'data',
+            )[1];
+            const prefix = '{"Action":"start","payload":"';
+            const suffix = '"}';
+            const event = Buffer.from(
+                prefix +
+                    'x'.repeat(
+                        MAX_DOCKER_EVENT_BYTES - prefix.length - suffix.length,
+                    ) +
+                    suffix,
+            );
+            expect(event.length).toBe(MAX_DOCKER_EVENT_BYTES);
+
+            // LF boundary
+            dataHandler(Buffer.concat([event, Buffer.from('\n')]));
+            // Single-chunk CRLF boundary
+            dataHandler(Buffer.concat([event, Buffer.from('\r\n')]));
+            // Split CRLF boundary
+            dataHandler(Buffer.concat([event, Buffer.from('\r')]));
+            dataHandler(Buffer.from('\n'));
+
+            expect(warn).not.toHaveBeenCalled();
+            expect(docker.onDockerEvent).toHaveBeenCalledTimes(3);
+            expect(docker.onDockerEvent.mock.calls[0][0]).toEqual(event);
+            expect(docker.onDockerEvent.mock.calls[1][0]).toEqual(event);
+            expect(docker.onDockerEvent.mock.calls[2][0]).toEqual(event);
         });
 
         test('should update container status on other events', async () => {
@@ -6380,6 +6621,379 @@ describe('Docker Watcher', () => {
                 docker.isDeregistered = true;
                 await docker.listenDockerEvents();
                 expect(mockDockerApi.getEvents).not.toHaveBeenCalled();
+            });
+        });
+
+        describe('Issue #1575 - Event Stream Reconnect Reconciliation', () => {
+            const createMockEventStream = () => {
+                const listeners: Record<string, (...args: any[]) => void> = {};
+                return {
+                    listeners,
+                    on: jest.fn(),
+                    once: jest.fn(
+                        (eventName: string, cb: (...args: any[]) => void) => {
+                            listeners[eventName] = cb;
+                        },
+                    ),
+                    removeAllListeners: jest.fn(),
+                    destroy: jest.fn(),
+                };
+            };
+
+            test('clean initial connection does not redundantly trigger reconcileStoreContainers', async () => {
+                await docker.register('watcher', 'docker', 'test', {
+                    watchevents: false,
+                });
+                const reconcileSpy = jest
+                    .spyOn(docker, 'reconcileStoreContainers')
+                    .mockResolvedValue(undefined);
+                const stream = createMockEventStream();
+                mockDockerApi.getEvents.mockImplementation(
+                    (_opts, callback) => {
+                        callback(null, stream);
+                    },
+                );
+
+                await docker.listenDockerEvents();
+
+                expect(docker.hasConnectedEvents).toBe(true);
+                expect(docker.eventsReconnectAttempts).toBe(0);
+                expect(reconcileSpy).not.toHaveBeenCalled();
+            });
+
+            test('reconnecting after stream error or end triggers reconcileStoreContainers and reconciles missed containers', async () => {
+                jest.useFakeTimers();
+                try {
+                    await docker.register('watcher', 'docker', 'test', {
+                        watchevents: false,
+                    });
+                    // Wait for startup reconciliation from register/init to settle
+                    await Promise.resolve();
+                    await Promise.resolve();
+
+                    const stream1 = createMockEventStream();
+                    const stream2 = createMockEventStream();
+                    const stream3 = createMockEventStream();
+                    mockDockerApi.getEvents
+                        .mockImplementationOnce((_opts, callback) => {
+                            callback(null, stream1);
+                        })
+                        .mockImplementationOnce((_opts, callback) => {
+                            callback(null, stream2);
+                        })
+                        .mockImplementationOnce((_opts, callback) => {
+                            callback(null, stream3);
+                        });
+
+                    const reconcileSpy = jest.spyOn(
+                        docker,
+                        'reconcileStoreContainers',
+                    );
+                    docker.pruneContainerFromStore = jest
+                        .fn()
+                        .mockResolvedValue(undefined);
+                    docker.reconcileContainer = jest
+                        .fn()
+                        .mockResolvedValue(undefined);
+                    const infoSpy = jest.spyOn(docker.log, 'info');
+
+                    // Initial connection: no redundant reconciliation
+                    await docker.listenDockerEvents();
+                    expect(reconcileSpy).not.toHaveBeenCalled();
+
+                    // Simulate socket proxy recreated during disconnect (error event)
+                    storeContainer.getContainers.mockReturnValue([
+                        { id: 'old-proxy-id', name: 'socket-proxy' },
+                        { id: 'unchanged-id', name: 'unchanged-app' },
+                    ]);
+                    mockDockerApi.listContainers.mockResolvedValue([
+                        { Id: 'new-proxy-id' },
+                        { Id: 'unchanged-id' },
+                    ]);
+
+                    stream1.listeners.error(new Error('aborted'));
+                    expect(docker.eventsReconnectAttempts).toBe(1);
+
+                    // Advance timers to run scheduled reconnect -> stream2
+                    jest.advanceTimersByTime(3000);
+                    await Promise.resolve();
+                    await Promise.resolve();
+                    await Promise.resolve();
+
+                    expect(reconcileSpy).toHaveBeenCalledTimes(1);
+                    expect(reconcileSpy).toHaveBeenCalledWith('reconnect');
+                    expect(docker.eventsReconnectAttempts).toBe(0);
+                    expect(docker.pruneContainerFromStore).toHaveBeenCalledWith(
+                        'old-proxy-id',
+                    );
+                    expect(docker.reconcileContainer).toHaveBeenCalledWith(
+                        'new-proxy-id',
+                    );
+                    expect(infoSpy).toHaveBeenCalledWith(
+                        expect.stringContaining(
+                            'from store during reconnect reconciliation',
+                        ),
+                    );
+                    expect(infoSpy).toHaveBeenCalledWith(
+                        expect.stringContaining(
+                            'missing from store during reconnect reconciliation',
+                        ),
+                    );
+
+                    // Subsequent stream end also triggers reconnect reconciliation -> stream3
+                    storeContainer.getContainers.mockReturnValue([
+                        { id: 'new-proxy-id', name: 'socket-proxy' },
+                    ]);
+                    mockDockerApi.listContainers.mockResolvedValue([
+                        { Id: 'new-proxy-id' },
+                    ]);
+                    stream2.listeners.end();
+                    jest.advanceTimersByTime(3000);
+                    await Promise.resolve();
+                    await Promise.resolve();
+
+                    expect(reconcileSpy).toHaveBeenCalledTimes(2);
+                    expect(reconcileSpy).toHaveBeenLastCalledWith('reconnect');
+                } finally {
+                    jest.useRealTimers();
+                }
+            });
+
+            test('retry connection succeeding after initial getEvents failure triggers reconcileStoreContainers', async () => {
+                jest.useFakeTimers();
+                try {
+                    await docker.register('watcher', 'docker', 'test', {
+                        watchevents: false,
+                    });
+                    const reconcileSpy = jest
+                        .spyOn(docker, 'reconcileStoreContainers')
+                        .mockResolvedValue(undefined);
+                    const stream = createMockEventStream();
+
+                    mockDockerApi.getEvents
+                        .mockImplementationOnce((_opts, callback) => {
+                            callback(new Error('ECONNREFUSED'));
+                        })
+                        .mockImplementationOnce((_opts, callback) => {
+                            callback(null, stream);
+                        });
+
+                    // First attempt fails
+                    await docker.listenDockerEvents();
+                    expect(docker.hasConnectedEvents).toBe(false);
+                    expect(docker.eventsReconnectAttempts).toBe(1);
+                    expect(reconcileSpy).not.toHaveBeenCalled();
+
+                    // Retry succeeds -> must reconcile because eventsReconnectAttempts > 0
+                    jest.advanceTimersByTime(3000);
+                    await Promise.resolve();
+
+                    expect(docker.hasConnectedEvents).toBe(true);
+                    expect(docker.eventsReconnectAttempts).toBe(0);
+                    expect(reconcileSpy).toHaveBeenCalledTimes(1);
+                    expect(reconcileSpy).toHaveBeenCalledWith('reconnect');
+                } finally {
+                    jest.useRealTimers();
+                }
+            });
+
+            test('deregistered watcher does not trigger reconciliation on reconnect or in flight', async () => {
+                await docker.register('watcher', 'docker', 'test', {
+                    watchevents: false,
+                });
+                await Promise.resolve();
+                await Promise.resolve();
+
+                // Case 1: deregistered while getEvents callback is pending during reconnect
+                docker.hasConnectedEvents = true;
+                let pendingCallback:
+                    | ((err: any, stream?: any) => void)
+                    | undefined;
+                mockDockerApi.getEvents.mockImplementation(
+                    (_opts, callback) => {
+                        pendingCallback = callback;
+                    },
+                );
+                const reconcileSpy = jest.spyOn(
+                    docker,
+                    'reconcileStoreContainers',
+                );
+
+                await docker.listenDockerEvents();
+                await docker.deregisterComponent();
+                const lateStream = createMockEventStream();
+                pendingCallback?.(null, lateStream);
+
+                expect(lateStream.destroy).toHaveBeenCalled();
+                expect(reconcileSpy).not.toHaveBeenCalled();
+
+                // Case 2: direct call to reconcileStoreContainers when already deregistered
+                mockDockerApi.listContainers.mockClear();
+                await docker.reconcileStoreContainers('reconnect');
+                expect(mockDockerApi.listContainers).not.toHaveBeenCalled();
+
+                // Case 3: deregistered while listContainers is in flight
+                docker.isDeregistered = false;
+                let resolveList!: (value: any[]) => void;
+                mockDockerApi.listContainers.mockImplementation(
+                    () =>
+                        new Promise((resolve) => {
+                            resolveList = resolve;
+                        }),
+                );
+                storeContainer.getContainers.mockReturnValue([
+                    { id: 'dead-1', name: 'dead-app' },
+                ]);
+                docker.pruneContainerFromStore = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+                docker.reconcileContainer = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+
+                const inFlight = docker.reconcileStoreContainers('reconnect');
+                await docker.deregisterComponent();
+                resolveList([{ Id: 'new-1' }]);
+                await inFlight;
+
+                expect(docker.pruneContainerFromStore).not.toHaveBeenCalled();
+                expect(docker.reconcileContainer).not.toHaveBeenCalled();
+            });
+
+            test('deregistering mid-loop during prune or add stops further reconciliation work', async () => {
+                await docker.register('watcher', 'docker', 'test', {
+                    watchevents: false,
+                });
+                await Promise.resolve();
+                await Promise.resolve();
+
+                storeContainer.getContainers.mockReturnValue([
+                    { id: 'dead-1', name: 'dead-1' },
+                    { id: 'dead-2', name: 'dead-2' },
+                ]);
+                mockDockerApi.listContainers.mockResolvedValue([
+                    { Id: 'new-1' },
+                    { Id: 'new-2' },
+                ]);
+                docker.pruneContainerFromStore = jest
+                    .fn()
+                    .mockImplementationOnce(async () => {
+                        docker.isDeregistered = true;
+                    });
+                docker.reconcileContainer = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+
+                await docker.reconcileStoreContainers('reconnect');
+
+                expect(docker.pruneContainerFromStore).toHaveBeenCalledTimes(1);
+                expect(docker.pruneContainerFromStore).toHaveBeenCalledWith(
+                    'dead-1',
+                );
+                expect(docker.reconcileContainer).not.toHaveBeenCalled();
+
+                // Now test deregistering during the toAdd loop
+                docker.isDeregistered = false;
+                storeContainer.getContainers.mockReturnValue([]);
+                docker.reconcileContainer = jest
+                    .fn()
+                    .mockImplementationOnce(async () => {
+                        docker.isDeregistered = true;
+                    });
+
+                await docker.reconcileStoreContainers('reconnect');
+
+                expect(docker.reconcileContainer).toHaveBeenCalledTimes(1);
+                expect(docker.reconcileContainer).toHaveBeenCalledWith('new-1');
+            });
+
+            test('handles reconciliation errors safely without unhandled rejections', async () => {
+                await docker.register('watcher', 'docker', 'test', {
+                    watchevents: false,
+                });
+                await Promise.resolve();
+                await Promise.resolve();
+
+                const warnSpy = jest.spyOn(docker.log, 'warn');
+
+                // Case 1: listContainers fails inside reconcileStoreContainers('reconnect')
+                mockDockerApi.listContainers.mockRejectedValueOnce(
+                    new Error('Docker API unavailable'),
+                );
+                await expect(
+                    docker.reconcileStoreContainers('reconnect'),
+                ).resolves.toBeUndefined();
+                expect(warnSpy).toHaveBeenCalledWith(
+                    expect.stringContaining(
+                        'Failed reconnect reconciliation of store containers: Docker API unavailable',
+                    ),
+                );
+
+                // Case 2: reconcileStoreContainers rejects unexpectedly when triggered by listenDockerEvents
+                warnSpy.mockClear();
+                docker.hasConnectedEvents = true;
+                jest.spyOn(
+                    docker,
+                    'reconcileStoreContainers',
+                ).mockRejectedValueOnce(new Error('unexpected failure'));
+                const stream = createMockEventStream();
+                mockDockerApi.getEvents.mockImplementation(
+                    (_opts, callback) => {
+                        callback(null, stream);
+                    },
+                );
+
+                await docker.listenDockerEvents();
+                await Promise.resolve();
+                await Promise.resolve();
+
+                expect(warnSpy).toHaveBeenCalledWith(
+                    expect.stringContaining(
+                        'Error during reconnect reconciliation: unexpected failure',
+                    ),
+                );
+            });
+
+            test('serializes and coalesces overlapping reconcileStoreContainers calls', async () => {
+                await docker.register('watcher', 'docker', 'test', {
+                    watchevents: false,
+                });
+                await Promise.resolve();
+                await Promise.resolve();
+                mockDockerApi.listContainers.mockClear();
+
+                let resolveFirst!: (value: any[]) => void;
+                mockDockerApi.listContainers
+                    .mockImplementationOnce(
+                        () =>
+                            new Promise((resolve) => {
+                                resolveFirst = resolve;
+                            }),
+                    )
+                    .mockResolvedValueOnce([{ Id: 'new-after-reconnect' }]);
+
+                storeContainer.getContainers.mockReturnValue([]);
+                docker.reconcileContainer = jest
+                    .fn()
+                    .mockResolvedValue(undefined);
+
+                const first = docker.reconcileStoreContainers('startup');
+                const second = docker.reconcileStoreContainers('reconnect');
+                const third = docker.reconcileStoreContainers('reconnect');
+
+                expect(mockDockerApi.listContainers).toHaveBeenCalledTimes(1);
+
+                resolveFirst([{ Id: 'initial-1' }]);
+                await Promise.all([first, second, third]);
+
+                // Coalesced into 2 total passes: initial startup + single follow-up reconnect
+                expect(mockDockerApi.listContainers).toHaveBeenCalledTimes(2);
+                expect(docker.reconcileContainer).toHaveBeenCalledWith(
+                    'initial-1',
+                );
+                expect(docker.reconcileContainer).toHaveBeenCalledWith(
+                    'new-after-reconnect',
+                );
             });
         });
 

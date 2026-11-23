@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
     title: WUD REST API
-    version: 9.8.0
+    version: 9.9.0
     description: |
         Welcome to the *WUD* REST API documentation.
 
@@ -580,6 +580,10 @@ paths:
             responses:
                 '200':
                     description: OK
+                '400':
+                    description: Bad Request
+                '403':
+                    description: Forbidden
                 '404':
                     description: Not Found
                 '500':
